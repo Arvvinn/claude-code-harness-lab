@@ -42,6 +42,7 @@ import type { AgentDefinition } from '@claude-code-best/builtin-tools/tools/Agen
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/SyntheticOutputTool/SyntheticOutputTool.js'
 import type { APIError } from '@anthropic-ai/sdk'
 import type { Message, SystemCompactBoundaryMessage } from './types/message.js'
+import { emitTrace, isTraceSessionActive } from './trace/bus.js'
 import type { OrphanedPermission } from './types/textInputTypes.js'
 import { createAbortController } from './utils/abortController.js'
 import type { AttributionState } from './utils/commitAttribution.js'
@@ -134,6 +135,30 @@ const snipProjection = feature('HISTORY_SNIP')
   ? (require('./services/compact/snipProjection.js') as typeof import('./services/compact/snipProjection.js'))
   : null
 /* eslint-enable @typescript-eslint/no-require-imports */
+
+function getTracePromptCharCount(prompt: string | ContentBlockParam[]): number {
+  if (typeof prompt === 'string') {
+    return prompt.length
+  }
+
+  let count = 0
+  for (const block of prompt) {
+    if (typeof block !== 'object' || block === null) {
+      continue
+    }
+
+    const record = block as unknown as Record<string, unknown>
+    if (record.type === 'text' && typeof record.text === 'string') {
+      count += record.text.length
+    }
+  }
+
+  return count
+}
+
+function getTraceInputSource(): 'pipe' | 'sdk' {
+  return isBareMode() ? 'pipe' : 'sdk'
+}
 
 export type QueryEngineConfig = {
   cwd: string
@@ -248,728 +273,428 @@ export class QueryEngine {
     setCwd(cwd)
     const persistSession = !isSessionPersistenceDisabled()
     const startTime = Date.now()
+    let traceTurnId: string | undefined
+    if (feature('HARNESS_TRACE')) {
+      if (isTraceSessionActive()) {
+        traceTurnId = randomUUID()
+      }
+    }
+    let traceTurnStarted = false
+    let traceTurnSuccess = false
+    let traceTurnError = false
+    let traceTurnResultSubtype: string | null = null
+    let traceTurnStopReason: string | null = null
+    let traceTurnErrorName: string | undefined
 
-    // Wrap canUseTool to track permission denials
-    const wrappedCanUseTool: CanUseToolFn = async (
-      tool,
-      input,
-      toolUseContext,
-      assistantMessage,
-      toolUseID,
-      forceDecision,
-    ) => {
-      const result = await canUseTool(
+    const setTraceTurnOutcome = (outcome: {
+      success: boolean
+      error: boolean
+      resultSubtype: string
+      stopReason?: string | null
+    }): void => {
+      traceTurnSuccess = outcome.success
+      traceTurnError = outcome.error
+      traceTurnResultSubtype = outcome.resultSubtype
+      traceTurnStopReason = outcome.stopReason ?? null
+    }
+
+    try {
+      // Wrap canUseTool to track permission denials
+      const wrappedCanUseTool: CanUseToolFn = async (
         tool,
         input,
         toolUseContext,
         assistantMessage,
         toolUseID,
         forceDecision,
-      )
-
-      // Track denials for SDK reporting
-      if (result.behavior !== 'allow') {
-        this.permissionDenials.push({
-          type: 'permission_denial',
-          tool_name: sdkCompatToolName(tool.name),
-          tool_use_id: toolUseID,
-          tool_input: input,
-        })
-      }
-
-      return result
-    }
-
-    const initialAppState = getAppState()
-    const initialMainLoopModel = userSpecifiedModel
-      ? parseUserSpecifiedModel(userSpecifiedModel)
-      : getMainLoopModel()
-
-    const initialThinkingConfig: ThinkingConfig = thinkingConfig
-      ? thinkingConfig
-      : shouldEnableThinkingByDefault() !== false
-        ? { type: 'adaptive' }
-        : { type: 'disabled' }
-
-    headlessProfilerCheckpoint('before_getSystemPrompt')
-    // Narrow once so TS tracks the type through the conditionals below.
-    const customPrompt =
-      typeof customSystemPrompt === 'string' ? customSystemPrompt : undefined
-    const {
-      defaultSystemPrompt,
-      userContext: baseUserContext,
-      systemContext,
-    } = await fetchSystemPromptParts({
-      tools,
-      mainLoopModel: initialMainLoopModel,
-      additionalWorkingDirectories: Array.from(
-        initialAppState.toolPermissionContext.additionalWorkingDirectories.keys(),
-      ),
-      mcpClients,
-      customSystemPrompt: customPrompt,
-    })
-    headlessProfilerCheckpoint('after_getSystemPrompt')
-    const userContext = {
-      ...baseUserContext,
-      ...getCoordinatorUserContext(
-        mcpClients,
-        isScratchpadEnabled() ? getScratchpadDir() : undefined,
-      ),
-    }
-
-    // When an SDK caller provides a custom system prompt AND has set
-    // CLAUDE_COWORK_MEMORY_PATH_OVERRIDE, inject the memory-mechanics prompt.
-    // The env var is an explicit opt-in signal — the caller has wired up
-    // a memory directory and needs Claude to know how to use it (which
-    // Write/Edit tools to call, MEMORY.md filename, loading semantics).
-    // The caller can layer their own policy text via appendSystemPrompt.
-    const memoryMechanicsPrompt =
-      customPrompt !== undefined && hasAutoMemPathOverride()
-        ? await loadMemoryPrompt()
-        : null
-
-    const systemPrompt = asSystemPrompt([
-      ...(customPrompt !== undefined ? [customPrompt] : defaultSystemPrompt),
-      ...(memoryMechanicsPrompt ? [memoryMechanicsPrompt] : []),
-      ...(appendSystemPrompt ? [appendSystemPrompt] : []),
-    ])
-
-    // Register function hook for structured output enforcement
-    const hasStructuredOutputTool = tools.some(t =>
-      toolMatchesName(t, SYNTHETIC_OUTPUT_TOOL_NAME),
-    )
-    if (jsonSchema && hasStructuredOutputTool) {
-      registerStructuredOutputEnforcement(setAppState, getSessionId())
-    }
-
-    let processUserInputContext: ProcessUserInputContext = {
-      messages: this.mutableMessages,
-      // Slash commands that mutate the message array (e.g. /force-snip)
-      // call setMessages(fn).  In interactive mode this writes back to
-      // AppState; in print mode we write back to mutableMessages so the
-      // rest of the query loop (push at :389, snapshot at :392) sees
-      // the result.  The second processUserInputContext below (after
-      // slash-command processing) keeps the no-op — nothing else calls
-      // setMessages past that point.
-      setMessages: fn => {
-        this.mutableMessages = fn(this.mutableMessages)
-      },
-      onChangeAPIKey: () => {},
-      handleElicitation: this.config.handleElicitation,
-      options: {
-        commands,
-        debug: false, // we use stdout, so don't want to clobber it
-        tools,
-        verbose,
-        mainLoopModel: initialMainLoopModel,
-        thinkingConfig: initialThinkingConfig,
-        mcpClients,
-        mcpResources: {},
-        ideInstallationStatus: null,
-        isNonInteractiveSession: true,
-        customSystemPrompt,
-        appendSystemPrompt,
-        agentDefinitions: { activeAgents: agents, allAgents: [] },
-        theme: resolveThemeSetting(getGlobalConfig().theme),
-        maxBudgetUsd,
-      },
-      getAppState,
-      setAppState,
-      abortController: this.abortController,
-      readFileState: this.readFileState,
-      nestedMemoryAttachmentTriggers: new Set<string>(),
-      loadedNestedMemoryPaths: this.loadedNestedMemoryPaths,
-      dynamicSkillDirTriggers: new Set<string>(),
-      discoveredSkillNames: this.discoveredSkillNames,
-      setInProgressToolUseIDs: () => {},
-      setResponseLength: () => {},
-      updateFileHistoryState: (
-        updater: (prev: FileHistoryState) => FileHistoryState,
       ) => {
-        setAppState(prev => {
-          const updated = updater(prev.fileHistory)
-          if (updated === prev.fileHistory) return prev
-          return { ...prev, fileHistory: updated }
-        })
-      },
-      updateAttributionState: (
-        updater: (prev: AttributionState) => AttributionState,
-      ) => {
-        setAppState(prev => {
-          const updated = updater(prev.attribution)
-          if (updated === prev.attribution) return prev
-          return { ...prev, attribution: updated }
-        })
-      },
-      setSDKStatus,
-    }
-
-    // Handle orphaned permission (only once per engine lifetime)
-    if (orphanedPermission && !this.hasHandledOrphanedPermission) {
-      this.hasHandledOrphanedPermission = true
-      for await (const message of handleOrphanedPermission(
-        orphanedPermission,
-        tools,
-        this.mutableMessages,
-        processUserInputContext,
-      )) {
-        yield message
-      }
-    }
-
-    const {
-      messages: messagesFromUserInput,
-      shouldQuery,
-      allowedTools,
-      model: modelFromUserInput,
-      resultText,
-    } = await processUserInput({
-      input: prompt,
-      mode: 'prompt',
-      setToolJSX: () => {},
-      context: {
-        ...processUserInputContext,
-        messages: this.mutableMessages,
-      },
-      messages: this.mutableMessages,
-      uuid: options?.uuid,
-      isMeta: options?.isMeta,
-      querySource: 'sdk',
-    })
-
-    // Push new messages, including user input and any attachments
-    this.mutableMessages.push(...messagesFromUserInput)
-
-    // Update params to reflect updates from processing /slash commands
-    const messages = [...this.mutableMessages]
-
-    // Persist the user's message(s) to transcript BEFORE entering the query
-    // loop. The for-await below only calls recordTranscript when ask() yields
-    // an assistant/user/compact_boundary message — which doesn't happen until
-    // the API responds. If the process is killed before that (e.g. user clicks
-    // Stop in cowork seconds after send), the transcript is left with only
-    // queue-operation entries; getLastSessionLog filters those out, returns
-    // null, and --resume fails with "No conversation found". Writing now makes
-    // the transcript resumable from the point the user message was accepted,
-    // even if no API response ever arrives.
-    //
-    // --bare / SIMPLE: fire-and-forget. Scripted calls don't --resume after
-    // kill-mid-request. The await is ~4ms on SSD, ~30ms under disk contention
-    // — the single largest controllable critical-path cost after module eval.
-    // Transcript is still written (for post-hoc debugging); just not blocking.
-    if (persistSession && messagesFromUserInput.length > 0) {
-      const transcriptPromise = recordTranscript(messages)
-      if (isBareMode()) {
-        void transcriptPromise
-      } else {
-        await transcriptPromise
-        if (
-          isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
-          isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
-        ) {
-          await flushSessionStorage()
-        }
-      }
-    }
-
-    // Filter messages that should be acknowledged after transcript
-    const _selector = messageSelector()
-    const replayableMessages = messagesFromUserInput.filter(
-      msg =>
-        (msg.type === 'user' &&
-          !msg.isMeta && // Skip synthetic caveat messages
-          !msg.toolUseResult && // Skip tool results (they'll be acked from query)
-          (_selector?.selectableUserMessagesFilter(msg) ?? true)) || // Skip non-user-authored messages (task notifications, etc.)
-        (msg.type === 'system' && msg.subtype === 'compact_boundary'), // Always ack compact boundaries
-    )
-    const messagesToAck = replayUserMessages ? replayableMessages : []
-
-    // Update the ToolPermissionContext based on user input processing (as necessary)
-    setAppState(prev => ({
-      ...prev,
-      toolPermissionContext: {
-        ...prev.toolPermissionContext,
-        alwaysAllowRules: {
-          ...prev.toolPermissionContext.alwaysAllowRules,
-          command: allowedTools,
-        },
-      },
-    }))
-
-    const mainLoopModel = modelFromUserInput ?? initialMainLoopModel
-
-    // Recreate after processing the prompt to pick up updated messages and
-    // model (from slash commands).
-    processUserInputContext = {
-      messages,
-      setMessages: () => {},
-      onChangeAPIKey: () => {},
-      handleElicitation: this.config.handleElicitation,
-      options: {
-        commands,
-        debug: false,
-        tools,
-        verbose,
-        mainLoopModel,
-        thinkingConfig: initialThinkingConfig,
-        mcpClients,
-        mcpResources: {},
-        ideInstallationStatus: null,
-        isNonInteractiveSession: true,
-        customSystemPrompt,
-        appendSystemPrompt,
-        theme: resolveThemeSetting(getGlobalConfig().theme),
-        agentDefinitions: { activeAgents: agents, allAgents: [] },
-        maxBudgetUsd,
-      },
-      getAppState,
-      setAppState,
-      abortController: this.abortController,
-      readFileState: this.readFileState,
-      nestedMemoryAttachmentTriggers: new Set<string>(),
-      loadedNestedMemoryPaths: this.loadedNestedMemoryPaths,
-      dynamicSkillDirTriggers: new Set<string>(),
-      discoveredSkillNames: this.discoveredSkillNames,
-      setInProgressToolUseIDs: () => {},
-      setResponseLength: () => {},
-      updateFileHistoryState: processUserInputContext.updateFileHistoryState,
-      updateAttributionState: processUserInputContext.updateAttributionState,
-      setSDKStatus,
-    }
-
-    headlessProfilerCheckpoint('before_skills_plugins')
-    // Cache-only: headless/SDK/CCR startup must not block on network for
-    // ref-tracked plugins. CCR populates the cache via CLAUDE_CODE_SYNC_PLUGIN_INSTALL
-    // (headlessPluginInstall) or CLAUDE_CODE_PLUGIN_SEED_DIR before this runs;
-    // SDK callers that need fresh source can call /reload-plugins.
-    const [skills, { enabled: enabledPlugins }] = await Promise.all([
-      getSlashCommandToolSkills(getCwd()),
-      loadAllPluginsCacheOnly(),
-    ])
-    headlessProfilerCheckpoint('after_skills_plugins')
-
-    yield buildSystemInitMessage({
-      tools,
-      mcpClients,
-      model: mainLoopModel,
-      permissionMode: initialAppState.toolPermissionContext
-        .mode as PermissionMode, // TODO: avoid the cast
-      commands,
-      agents,
-      skills,
-      plugins: enabledPlugins,
-      fastMode: initialAppState.fastMode,
-    })
-
-    // Record when system message is yielded for headless latency tracking
-    headlessProfilerCheckpoint('system_message_yielded')
-
-    if (!shouldQuery) {
-      // Return the results of local slash commands.
-      // Use messagesFromUserInput (not replayableMessages) for command output
-      // because selectableUserMessagesFilter excludes local-command-stdout tags.
-      for (const msg of messagesFromUserInput) {
-        if (
-          msg.type === 'user' &&
-          typeof msg.message!.content === 'string' &&
-          (msg.message!.content.includes(`<${LOCAL_COMMAND_STDOUT_TAG}>`) ||
-            msg.message!.content.includes(`<${LOCAL_COMMAND_STDERR_TAG}>`) ||
-            msg.isCompactSummary)
-        ) {
-          yield {
-            type: 'user',
-            message: {
-              ...msg.message,
-              content: stripAnsi(msg.message!.content),
-            },
-            session_id: getSessionId(),
-            parent_tool_use_id: null,
-            uuid: msg.uuid,
-            timestamp: msg.timestamp,
-            isReplay: !msg.isCompactSummary,
-            isSynthetic: msg.isMeta || msg.isVisibleInTranscriptOnly,
-          } as unknown as SDKUserMessageReplay
-        }
-
-        // Local command output — yield as a synthetic assistant message so
-        // RC renders it as assistant-style text rather than a user bubble.
-        // Emitted as assistant (not the dedicated SDKLocalCommandOutputMessage
-        // system subtype) so mobile clients + session-ingress can parse it.
-        if (
-          msg.type === 'system' &&
-          msg.subtype === 'local_command' &&
-          typeof msg.content === 'string' &&
-          (msg.content.includes(`<${LOCAL_COMMAND_STDOUT_TAG}>`) ||
-            msg.content.includes(`<${LOCAL_COMMAND_STDERR_TAG}>`))
-        ) {
-          yield localCommandOutputToSDKAssistantMessage(msg.content, msg.uuid)
-        }
-
-        if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
-          const compactMsg = msg as SystemCompactBoundaryMessage
-          yield {
-            type: 'system',
-            subtype: 'compact_boundary' as const,
-            session_id: getSessionId(),
-            uuid: msg.uuid,
-            compact_metadata: toSDKCompactMetadata(compactMsg.compactMetadata),
-          } as unknown as SDKCompactBoundaryMessage
-        }
-      }
-
-      if (persistSession) {
-        await recordTranscript(messages)
-        if (
-          isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
-          isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
-        ) {
-          await flushSessionStorage()
-        }
-      }
-
-      yield {
-        type: 'result',
-        subtype: 'success',
-        is_error: false,
-        duration_ms: Date.now() - startTime,
-        duration_api_ms: getTotalAPIDuration(),
-        num_turns: messages.length - 1,
-        result: resultText ?? '',
-        stop_reason: null,
-        session_id: getSessionId(),
-        total_cost_usd: getTotalCost(),
-        usage: this.totalUsage,
-        modelUsage: getModelUsage(),
-        permission_denials: this.permissionDenials,
-        fast_mode_state: getFastModeState(
-          mainLoopModel,
-          initialAppState.fastMode,
-        ),
-        uuid: randomUUID(),
-      }
-      return
-    }
-
-    if (fileHistoryEnabled() && persistSession) {
-      const _sel = messageSelector()
-      const _filter =
-        _sel?.selectableUserMessagesFilter ?? ((_msg: unknown) => true)
-      messagesFromUserInput.filter(_filter).forEach(message => {
-        void fileHistoryMakeSnapshot(
-          (updater: (prev: FileHistoryState) => FileHistoryState) => {
-            setAppState(prev => ({
-              ...prev,
-              fileHistory: updater(prev.fileHistory),
-            }))
-          },
-          message.uuid,
+        const result = await canUseTool(
+          tool,
+          input,
+          toolUseContext,
+          assistantMessage,
+          toolUseID,
+          forceDecision,
         )
+
+        // Track denials for SDK reporting
+        if (result.behavior !== 'allow') {
+          this.permissionDenials.push({
+            type: 'permission_denial',
+            tool_name: sdkCompatToolName(tool.name),
+            tool_use_id: toolUseID,
+            tool_input: input,
+          })
+        }
+
+        return result
+      }
+
+      const initialAppState = getAppState()
+      const initialMainLoopModel = userSpecifiedModel
+        ? parseUserSpecifiedModel(userSpecifiedModel)
+        : getMainLoopModel()
+
+      const initialThinkingConfig: ThinkingConfig = thinkingConfig
+        ? thinkingConfig
+        : shouldEnableThinkingByDefault() !== false
+          ? { type: 'adaptive' }
+          : { type: 'disabled' }
+
+      headlessProfilerCheckpoint('before_getSystemPrompt')
+      // Narrow once so TS tracks the type through the conditionals below.
+      const customPrompt =
+        typeof customSystemPrompt === 'string' ? customSystemPrompt : undefined
+      const {
+        defaultSystemPrompt,
+        userContext: baseUserContext,
+        systemContext,
+      } = await fetchSystemPromptParts({
+        tools,
+        mainLoopModel: initialMainLoopModel,
+        additionalWorkingDirectories: Array.from(
+          initialAppState.toolPermissionContext.additionalWorkingDirectories.keys(),
+        ),
+        mcpClients,
+        customSystemPrompt: customPrompt,
       })
-    }
+      headlessProfilerCheckpoint('after_getSystemPrompt')
+      const userContext = {
+        ...baseUserContext,
+        ...getCoordinatorUserContext(
+          mcpClients,
+          isScratchpadEnabled() ? getScratchpadDir() : undefined,
+        ),
+      }
 
-    // Track current message usage (reset on each message_start)
-    let currentMessageUsage: NonNullableUsage = EMPTY_USAGE
-    let turnCount = 1
-    let hasAcknowledgedInitialMessages = false
-    // Track structured output from StructuredOutput tool calls
-    let structuredOutputFromTool: unknown
-    // Track the last stop_reason from assistant messages
-    let lastStopReason: string | null = null
-    // Reference-based watermark so error_during_execution's errors[] is
-    // turn-scoped. A length-based index breaks when the 100-entry ring buffer
-    // shift()s during the turn — the index slides. If this entry is rotated
-    // out, lastIndexOf returns -1 and we include everything (safe fallback).
-    const errorLogWatermark = getInMemoryErrors().at(-1)
-    // Snapshot count before this query for delta-based retry limiting
-    const initialStructuredOutputCalls = jsonSchema
-      ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
-      : 0
+      // When an SDK caller provides a custom system prompt AND has set
+      // CLAUDE_COWORK_MEMORY_PATH_OVERRIDE, inject the memory-mechanics prompt.
+      // The env var is an explicit opt-in signal — the caller has wired up
+      // a memory directory and needs Claude to know how to use it (which
+      // Write/Edit tools to call, MEMORY.md filename, loading semantics).
+      // The caller can layer their own policy text via appendSystemPrompt.
+      const memoryMechanicsPrompt =
+        customPrompt !== undefined && hasAutoMemPathOverride()
+          ? await loadMemoryPrompt()
+          : null
 
-    for await (const message of query({
-      messages,
-      systemPrompt,
-      userContext,
-      systemContext,
-      canUseTool: wrappedCanUseTool,
-      toolUseContext: processUserInputContext,
-      fallbackModel,
-      querySource: 'sdk',
-      maxTurns,
-      taskBudget,
-    })) {
-      // Record assistant, user, and compact boundary messages
-      if (
-        message.type === 'assistant' ||
-        message.type === 'user' ||
-        (message.type === 'system' && message.subtype === 'compact_boundary')
-      ) {
-        // Before writing a compact boundary, flush any in-memory-only
-        // messages up through the preservedSegment tail. Attachments and
-        // progress are now recorded inline (their switch cases below), but
-        // this flush still matters for the preservedSegment tail walk.
-        // If the SDK subprocess restarts before then (claude-desktop kills
-        // between turns), tailUuid points to a never-written message →
-        // applyPreservedSegmentRelinks fails its tail→head walk → returns
-        // without pruning → resume loads full pre-compact history.
-        if (
-          persistSession &&
-          message.type === 'system' &&
-          message.subtype === 'compact_boundary'
-        ) {
-          const compactMsg = message as SystemCompactBoundaryMessage
-          const tailUuid =
-            compactMsg.compactMetadata?.preservedSegment?.tailUuid
-          if (tailUuid) {
-            const tailIdx = this.mutableMessages.findLastIndex(
-              m => m.uuid === tailUuid,
-            )
-            if (tailIdx !== -1) {
-              await recordTranscript(this.mutableMessages.slice(0, tailIdx + 1))
-            }
-          }
+      const systemPrompt = asSystemPrompt([
+        ...(customPrompt !== undefined ? [customPrompt] : defaultSystemPrompt),
+        ...(memoryMechanicsPrompt ? [memoryMechanicsPrompt] : []),
+        ...(appendSystemPrompt ? [appendSystemPrompt] : []),
+      ])
+
+      // Register function hook for structured output enforcement
+      const hasStructuredOutputTool = tools.some(t =>
+        toolMatchesName(t, SYNTHETIC_OUTPUT_TOOL_NAME),
+      )
+      if (jsonSchema && hasStructuredOutputTool) {
+        registerStructuredOutputEnforcement(setAppState, getSessionId())
+      }
+
+      let processUserInputContext: ProcessUserInputContext = {
+        messages: this.mutableMessages,
+        // Slash commands that mutate the message array (e.g. /force-snip)
+        // call setMessages(fn).  In interactive mode this writes back to
+        // AppState; in print mode we write back to mutableMessages so the
+        // rest of the query loop (push at :389, snapshot at :392) sees
+        // the result.  The second processUserInputContext below (after
+        // slash-command processing) keeps the no-op — nothing else calls
+        // setMessages past that point.
+        setMessages: fn => {
+          this.mutableMessages = fn(this.mutableMessages)
+        },
+        onChangeAPIKey: () => {},
+        handleElicitation: this.config.handleElicitation,
+        options: {
+          commands,
+          debug: false, // we use stdout, so don't want to clobber it
+          tools,
+          verbose,
+          mainLoopModel: initialMainLoopModel,
+          thinkingConfig: initialThinkingConfig,
+          mcpClients,
+          mcpResources: {},
+          ideInstallationStatus: null,
+          isNonInteractiveSession: true,
+          customSystemPrompt,
+          appendSystemPrompt,
+          agentDefinitions: { activeAgents: agents, allAgents: [] },
+          theme: resolveThemeSetting(getGlobalConfig().theme),
+          maxBudgetUsd,
+        },
+        getAppState,
+        setAppState,
+        abortController: this.abortController,
+        readFileState: this.readFileState,
+        nestedMemoryAttachmentTriggers: new Set<string>(),
+        loadedNestedMemoryPaths: this.loadedNestedMemoryPaths,
+        dynamicSkillDirTriggers: new Set<string>(),
+        discoveredSkillNames: this.discoveredSkillNames,
+        setInProgressToolUseIDs: () => {},
+        setResponseLength: () => {},
+        updateFileHistoryState: (
+          updater: (prev: FileHistoryState) => FileHistoryState,
+        ) => {
+          setAppState(prev => {
+            const updated = updater(prev.fileHistory)
+            if (updated === prev.fileHistory) return prev
+            return { ...prev, fileHistory: updated }
+          })
+        },
+        updateAttributionState: (
+          updater: (prev: AttributionState) => AttributionState,
+        ) => {
+          setAppState(prev => {
+            const updated = updater(prev.attribution)
+            if (updated === prev.attribution) return prev
+            return { ...prev, attribution: updated }
+          })
+        },
+        setSDKStatus,
+      }
+
+      // Handle orphaned permission (only once per engine lifetime)
+      if (orphanedPermission && !this.hasHandledOrphanedPermission) {
+        this.hasHandledOrphanedPermission = true
+        for await (const message of handleOrphanedPermission(
+          orphanedPermission,
+          tools,
+          this.mutableMessages,
+          processUserInputContext,
+        )) {
+          yield message
         }
-        messages.push(message as Message)
-        if (persistSession) {
-          // Fire-and-forget for assistant messages. claude.ts yields one
-          // assistant message per content block, then mutates the last
-          // one's message.usage/stop_reason on message_delta — relying on
-          // the write queue's 100ms lazy jsonStringify. Awaiting here
-          // blocks ask()'s generator, so message_delta can't run until
-          // every block is consumed; the drain timer (started at block 1)
-          // elapses first. Interactive CC doesn't hit this because
-          // useLogMessages.ts fire-and-forgets. enqueueWrite is
-          // order-preserving so fire-and-forget here is safe.
-          if (message.type === 'assistant') {
-            void recordTranscript(messages)
-          } else {
-            await recordTranscript(messages)
-          }
-        }
+      }
 
-        // Acknowledge initial user messages after first transcript recording
-        if (!hasAcknowledgedInitialMessages && messagesToAck.length > 0) {
-          hasAcknowledgedInitialMessages = true
-          for (const msgToAck of messagesToAck) {
-            if (msgToAck.type === 'user') {
-              yield {
-                type: 'user',
-                message: msgToAck.message,
-                session_id: getSessionId(),
-                parent_tool_use_id: null,
-                uuid: msgToAck.uuid,
-                timestamp: msgToAck.timestamp,
-                isReplay: true,
-              } as unknown as SDKUserMessageReplay
-            }
+      const {
+        messages: messagesFromUserInput,
+        shouldQuery,
+        allowedTools,
+        model: modelFromUserInput,
+        resultText,
+      } = await processUserInput({
+        input: prompt,
+        mode: 'prompt',
+        setToolJSX: () => {},
+        context: {
+          ...processUserInputContext,
+          messages: this.mutableMessages,
+        },
+        messages: this.mutableMessages,
+        uuid: options?.uuid,
+        isMeta: options?.isMeta,
+        querySource: 'sdk',
+      })
+
+      traceTurnStarted = true
+      if (feature('HARNESS_TRACE')) {
+        if (traceTurnId === undefined && isTraceSessionActive()) {
+          traceTurnId = randomUUID()
+        }
+        emitTrace({
+          source: 'query',
+          type: 'turn.start',
+          turnId: traceTurnId,
+          payload: {
+            inputSource: getTraceInputSource(),
+            inputMode: 'prompt',
+            promptKind: typeof prompt === 'string' ? 'text' : 'blocks',
+            messageCountBefore: this.mutableMessages.length,
+            acceptedMessageCount: messagesFromUserInput.length,
+            shouldQuery,
+          },
+        })
+      }
+      if (feature('HARNESS_TRACE')) {
+        emitTrace({
+          source: 'query',
+          type: 'user.input_received',
+          turnId: traceTurnId,
+          payload: {
+            inputSource: getTraceInputSource(),
+            inputMode: 'prompt',
+            inputChars: getTracePromptCharCount(prompt),
+            messageCountBefore: this.mutableMessages.length,
+            acceptedMessageCount: messagesFromUserInput.length,
+            messageCountAfter:
+              this.mutableMessages.length + messagesFromUserInput.length,
+            shouldQuery,
+            isMeta: options?.isMeta === true,
+          },
+        })
+      }
+
+      // Push new messages, including user input and any attachments
+      this.mutableMessages.push(...messagesFromUserInput)
+
+      // Update params to reflect updates from processing /slash commands
+      const messages = [...this.mutableMessages]
+
+      // Persist the user's message(s) to transcript BEFORE entering the query
+      // loop. The for-await below only calls recordTranscript when ask() yields
+      // an assistant/user/compact_boundary message — which doesn't happen until
+      // the API responds. If the process is killed before that (e.g. user clicks
+      // Stop in cowork seconds after send), the transcript is left with only
+      // queue-operation entries; getLastSessionLog filters those out, returns
+      // null, and --resume fails with "No conversation found". Writing now makes
+      // the transcript resumable from the point the user message was accepted,
+      // even if no API response ever arrives.
+      //
+      // --bare / SIMPLE: fire-and-forget. Scripted calls don't --resume after
+      // kill-mid-request. The await is ~4ms on SSD, ~30ms under disk contention
+      // — the single largest controllable critical-path cost after module eval.
+      // Transcript is still written (for post-hoc debugging); just not blocking.
+      if (persistSession && messagesFromUserInput.length > 0) {
+        const transcriptPromise = recordTranscript(messages)
+        if (isBareMode()) {
+          void transcriptPromise
+        } else {
+          await transcriptPromise
+          if (
+            isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
+            isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
+          ) {
+            await flushSessionStorage()
           }
         }
       }
 
-      if (message.type === 'user') {
-        turnCount++
+      // Filter messages that should be acknowledged after transcript
+      const _selector = messageSelector()
+      const replayableMessages = messagesFromUserInput.filter(
+        msg =>
+          (msg.type === 'user' &&
+            !msg.isMeta && // Skip synthetic caveat messages
+            !msg.toolUseResult && // Skip tool results (they'll be acked from query)
+            (_selector?.selectableUserMessagesFilter(msg) ?? true)) || // Skip non-user-authored messages (task notifications, etc.)
+          (msg.type === 'system' && msg.subtype === 'compact_boundary'), // Always ack compact boundaries
+      )
+      const messagesToAck = replayUserMessages ? replayableMessages : []
+
+      // Update the ToolPermissionContext based on user input processing (as necessary)
+      setAppState(prev => ({
+        ...prev,
+        toolPermissionContext: {
+          ...prev.toolPermissionContext,
+          alwaysAllowRules: {
+            ...prev.toolPermissionContext.alwaysAllowRules,
+            command: allowedTools,
+          },
+        },
+      }))
+
+      const mainLoopModel = modelFromUserInput ?? initialMainLoopModel
+
+      // Recreate after processing the prompt to pick up updated messages and
+      // model (from slash commands).
+      processUserInputContext = {
+        messages,
+        setMessages: () => {},
+        onChangeAPIKey: () => {},
+        handleElicitation: this.config.handleElicitation,
+        options: {
+          commands,
+          debug: false,
+          tools,
+          verbose,
+          mainLoopModel,
+          thinkingConfig: initialThinkingConfig,
+          mcpClients,
+          mcpResources: {},
+          ideInstallationStatus: null,
+          isNonInteractiveSession: true,
+          customSystemPrompt,
+          appendSystemPrompt,
+          theme: resolveThemeSetting(getGlobalConfig().theme),
+          agentDefinitions: { activeAgents: agents, allAgents: [] },
+          maxBudgetUsd,
+        },
+        getAppState,
+        setAppState,
+        abortController: this.abortController,
+        readFileState: this.readFileState,
+        nestedMemoryAttachmentTriggers: new Set<string>(),
+        loadedNestedMemoryPaths: this.loadedNestedMemoryPaths,
+        dynamicSkillDirTriggers: new Set<string>(),
+        discoveredSkillNames: this.discoveredSkillNames,
+        setInProgressToolUseIDs: () => {},
+        setResponseLength: () => {},
+        updateFileHistoryState: processUserInputContext.updateFileHistoryState,
+        updateAttributionState: processUserInputContext.updateAttributionState,
+        setSDKStatus,
       }
 
-      switch (message.type) {
-        case 'tombstone':
-          // Tombstone messages are control signals for removing messages, skip them
-          break
-        case 'assistant': {
-          // Capture stop_reason if already set (synthetic messages). For
-          // streamed responses, this is null at content_block_stop time;
-          // the real value arrives via message_delta (handled below).
-          const msg = message as Message
-          const stopReason = msg.message?.stop_reason as
-            | string
-            | null
-            | undefined
-          if (stopReason != null) {
-            lastStopReason = stopReason
-          }
-          this.mutableMessages.push(msg)
-          yield* normalizeMessage(msg)
-          break
-        }
-        case 'progress': {
-          const msg = message as Message
-          this.mutableMessages.push(msg)
-          // Record inline so the dedup loop in the next ask() call sees it
-          // as already-recorded. Without this, deferred progress interleaves
-          // with already-recorded tool_results in mutableMessages, and the
-          // dedup walk freezes startingParentUuid at the wrong message —
-          // forking the chain and orphaning the conversation on resume.
-          if (persistSession) {
-            messages.push(msg)
-            void recordTranscript(messages)
-          }
-          yield* normalizeMessage(msg)
-          break
-        }
-        case 'user': {
-          const msg = message as Message
-          this.mutableMessages.push(msg)
-          yield* normalizeMessage(msg)
-          break
-        }
-        case 'stream_event': {
-          const event = (
-            message as unknown as { event: Record<string, unknown> }
-          ).event
-          if (event.type === 'message_start') {
-            // Reset current message usage for new message
-            currentMessageUsage = EMPTY_USAGE
-            const eventMessage = event.message as {
-              usage: BetaMessageDeltaUsage
-            }
-            currentMessageUsage = updateUsage(
-              currentMessageUsage,
-              eventMessage.usage,
-            )
-          }
-          if (event.type === 'message_delta') {
-            currentMessageUsage = updateUsage(
-              currentMessageUsage,
-              event.usage as BetaMessageDeltaUsage,
-            )
-            // Capture stop_reason from message_delta. The assistant message
-            // is yielded at content_block_stop with stop_reason=null; the
-            // real value only arrives here (see claude.ts message_delta
-            // handler). Without this, result.stop_reason is always null.
-            const delta = event.delta as { stop_reason?: string | null }
-            if (delta.stop_reason != null) {
-              lastStopReason = delta.stop_reason
-            }
-          }
-          if (event.type === 'message_stop') {
-            // Accumulate current message usage into total
-            this.totalUsage = accumulateUsage(
-              this.totalUsage,
-              currentMessageUsage,
-            )
-          }
+      headlessProfilerCheckpoint('before_skills_plugins')
+      // Cache-only: headless/SDK/CCR startup must not block on network for
+      // ref-tracked plugins. CCR populates the cache via CLAUDE_CODE_SYNC_PLUGIN_INSTALL
+      // (headlessPluginInstall) or CLAUDE_CODE_PLUGIN_SEED_DIR before this runs;
+      // SDK callers that need fresh source can call /reload-plugins.
+      const [skills, { enabled: enabledPlugins }] = await Promise.all([
+        getSlashCommandToolSkills(getCwd()),
+        loadAllPluginsCacheOnly(),
+      ])
+      headlessProfilerCheckpoint('after_skills_plugins')
 
-          if (includePartialMessages) {
-            yield {
-              type: 'stream_event' as const,
-              event,
-              session_id: getSessionId(),
-              parent_tool_use_id: null,
-              uuid: randomUUID(),
-            }
-          }
+      yield buildSystemInitMessage({
+        tools,
+        mcpClients,
+        model: mainLoopModel,
+        permissionMode: initialAppState.toolPermissionContext
+          .mode as PermissionMode, // TODO: avoid the cast
+        commands,
+        agents,
+        skills,
+        plugins: enabledPlugins,
+        fastMode: initialAppState.fastMode,
+      })
 
-          break
-        }
-        case 'attachment': {
-          const msg = message as Message
-          this.mutableMessages.push(msg)
-          // Record inline (same reason as progress above).
-          if (persistSession) {
-            messages.push(msg)
-            void recordTranscript(messages)
-          }
+      // Record when system message is yielded for headless latency tracking
+      headlessProfilerCheckpoint('system_message_yielded')
 
-          const attachment = msg.attachment as {
-            type: string
-            data?: unknown
-            turnCount?: number
-            maxTurns?: number
-            prompt?: string
-            source_uuid?: string
-            [key: string]: unknown
-          }
-
-          // Extract structured output from StructuredOutput tool calls
-          if (attachment.type === 'structured_output') {
-            structuredOutputFromTool = attachment.data
-          }
-          // Handle max turns reached signal from query.ts
-          else if (attachment.type === 'max_turns_reached') {
-            if (persistSession) {
-              if (
-                isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
-                isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
-              ) {
-                await flushSessionStorage()
-              }
-            }
-            yield {
-              type: 'result',
-              subtype: 'error_max_turns',
-              duration_ms: Date.now() - startTime,
-              duration_api_ms: getTotalAPIDuration(),
-              is_error: true,
-              num_turns: attachment.turnCount as number,
-              stop_reason: lastStopReason,
-              session_id: getSessionId(),
-              total_cost_usd: getTotalCost(),
-              usage: this.totalUsage,
-              modelUsage: getModelUsage(),
-              permission_denials: this.permissionDenials,
-              fast_mode_state: getFastModeState(
-                mainLoopModel,
-                initialAppState.fastMode,
-              ),
-              uuid: randomUUID(),
-              errors: [
-                `Reached maximum number of turns (${attachment.maxTurns})`,
-              ],
-            }
-            return
-          }
-          // Yield queued_command attachments as SDK user message replays
-          else if (replayUserMessages && attachment.type === 'queued_command') {
+      if (!shouldQuery) {
+        // Return the results of local slash commands.
+        // Use messagesFromUserInput (not replayableMessages) for command output
+        // because selectableUserMessagesFilter excludes local-command-stdout tags.
+        for (const msg of messagesFromUserInput) {
+          if (
+            msg.type === 'user' &&
+            typeof msg.message!.content === 'string' &&
+            (msg.message!.content.includes(`<${LOCAL_COMMAND_STDOUT_TAG}>`) ||
+              msg.message!.content.includes(`<${LOCAL_COMMAND_STDERR_TAG}>`) ||
+              msg.isCompactSummary)
+          ) {
             yield {
               type: 'user',
               message: {
-                role: 'user' as const,
-                content: attachment.prompt,
+                ...msg.message,
+                content: stripAnsi(msg.message!.content),
               },
               session_id: getSessionId(),
               parent_tool_use_id: null,
-              uuid: attachment.source_uuid || msg.uuid,
+              uuid: msg.uuid,
               timestamp: msg.timestamp,
-              isReplay: true,
+              isReplay: !msg.isCompactSummary,
+              isSynthetic: msg.isMeta || msg.isVisibleInTranscriptOnly,
             } as unknown as SDKUserMessageReplay
           }
-          break
-        }
-        case 'stream_request_start':
-          // Don't yield stream request start messages
-          break
-        case 'system': {
-          const msg = message as Message
-          // Snip boundary: replay on our store to remove zombie messages and
-          // stale markers. The yielded boundary is a signal, not data to push —
-          // the replay produces its own equivalent boundary. Without this,
-          // markers persist and re-trigger on every turn, and mutableMessages
-          // never shrinks (memory leak in long SDK sessions). The subtype
-          // check lives inside the injected callback so feature-gated strings
-          // stay out of this file (excluded-strings check).
-          const snipResult = this.config.snipReplay?.(msg, this.mutableMessages)
-          if (snipResult !== undefined) {
-            if (snipResult.executed) {
-              this.mutableMessages.length = 0
-              this.mutableMessages.push(...snipResult.messages)
-            }
-            break
-          }
-          this.mutableMessages.push(msg)
-          // Yield compact boundary messages to SDK
-          if (msg.subtype === 'compact_boundary' && msg.compactMetadata) {
-            const compactMsg = msg as SystemCompactBoundaryMessage
-            // Release pre-compaction messages for GC. The boundary was just
-            // pushed so it's the last element. query.ts already uses
-            // getMessagesAfterCompactBoundary() internally, so only
-            // post-boundary messages are needed going forward.
-            const mutableBoundaryIdx = this.mutableMessages.length - 1
-            if (mutableBoundaryIdx > 0) {
-              this.mutableMessages.splice(0, mutableBoundaryIdx)
-            }
-            const localBoundaryIdx = messages.length - 1
-            if (localBoundaryIdx > 0) {
-              messages.splice(0, localBoundaryIdx)
-            }
 
+          // Local command output — yield as a synthetic assistant message so
+          // RC renders it as assistant-style text rather than a user bubble.
+          // Emitted as assistant (not the dedicated SDKLocalCommandOutputMessage
+          // system subtype) so mobile clients + session-ingress can parse it.
+          if (
+            msg.type === 'system' &&
+            msg.subtype === 'local_command' &&
+            typeof msg.content === 'string' &&
+            (msg.content.includes(`<${LOCAL_COMMAND_STDOUT_TAG}>`) ||
+              msg.content.includes(`<${LOCAL_COMMAND_STDERR_TAG}>`))
+          ) {
+            yield localCommandOutputToSDKAssistantMessage(msg.content, msg.uuid)
+          }
+
+          if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+            const compactMsg = msg as SystemCompactBoundaryMessage
             yield {
               type: 'system',
               subtype: 'compact_boundary' as const,
@@ -978,50 +703,12 @@ export class QueryEngine {
               compact_metadata: toSDKCompactMetadata(
                 compactMsg.compactMetadata,
               ),
-            }
+            } as unknown as SDKCompactBoundaryMessage
           }
-          if (msg.subtype === 'api_error') {
-            const apiErrorMsg = msg as Message & {
-              retryAttempt: number
-              maxRetries: number
-              retryInMs: number
-              error: APIError
-            }
-            yield {
-              type: 'system',
-              subtype: 'api_retry' as const,
-              attempt: apiErrorMsg.retryAttempt,
-              max_retries: apiErrorMsg.maxRetries,
-              retry_delay_ms: apiErrorMsg.retryInMs,
-              error_status: apiErrorMsg.error.status ?? null,
-              error: categorizeRetryableAPIError(apiErrorMsg.error),
-              session_id: getSessionId(),
-              uuid: msg.uuid,
-            }
-          }
-          // Don't yield other system messages in headless mode
-          break
         }
-        case 'tool_use_summary': {
-          const msg = message as Message & {
-            summary: unknown
-            precedingToolUseIds: unknown
-          }
-          // Yield tool use summary messages to SDK
-          yield {
-            type: 'tool_use_summary' as const,
-            summary: msg.summary,
-            preceding_tool_use_ids: msg.precedingToolUseIds,
-            session_id: getSessionId(),
-            uuid: msg.uuid,
-          }
-          break
-        }
-      }
 
-      // Check if USD budget has been exceeded
-      if (maxBudgetUsd !== undefined && getTotalCost() >= maxBudgetUsd) {
         if (persistSession) {
+          await recordTranscript(messages)
           if (
             isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
             isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
@@ -1029,14 +716,22 @@ export class QueryEngine {
             await flushSessionStorage()
           }
         }
+
+        setTraceTurnOutcome({
+          success: true,
+          error: false,
+          resultSubtype: 'success',
+          stopReason: null,
+        })
         yield {
           type: 'result',
-          subtype: 'error_max_budget_usd',
+          subtype: 'success',
+          is_error: false,
           duration_ms: Date.now() - startTime,
           duration_api_ms: getTotalAPIDuration(),
-          is_error: true,
-          num_turns: turnCount,
-          stop_reason: lastStopReason,
+          num_turns: messages.length - 1,
+          result: resultText ?? '',
+          stop_reason: null,
           session_id: getSessionId(),
           total_cost_usd: getTotalCost(),
           usage: this.totalUsage,
@@ -1047,25 +742,396 @@ export class QueryEngine {
             initialAppState.fastMode,
           ),
           uuid: randomUUID(),
-          errors: [
-            `Reached maximum budget ($${maxBudgetUsd}). Increase the limit with --max-budget-usd or start a new session.`,
-          ],
         }
         return
       }
 
-      // Check if structured output retry limit exceeded (only on user messages)
-      if (message.type === 'user' && jsonSchema) {
-        const currentCalls = countToolCalls(
-          this.mutableMessages,
-          SYNTHETIC_OUTPUT_TOOL_NAME,
-        )
-        const callsThisQuery = currentCalls - initialStructuredOutputCalls
-        const maxRetries = parseInt(
-          process.env.MAX_STRUCTURED_OUTPUT_RETRIES || '5',
-          10,
-        )
-        if (callsThisQuery >= maxRetries) {
+      if (fileHistoryEnabled() && persistSession) {
+        const _sel = messageSelector()
+        const _filter =
+          _sel?.selectableUserMessagesFilter ?? ((_msg: unknown) => true)
+        messagesFromUserInput.filter(_filter).forEach(message => {
+          void fileHistoryMakeSnapshot(
+            (updater: (prev: FileHistoryState) => FileHistoryState) => {
+              setAppState(prev => ({
+                ...prev,
+                fileHistory: updater(prev.fileHistory),
+              }))
+            },
+            message.uuid,
+          )
+        })
+      }
+
+      // Track current message usage (reset on each message_start)
+      let currentMessageUsage: NonNullableUsage = EMPTY_USAGE
+      let turnCount = 1
+      let hasAcknowledgedInitialMessages = false
+      // Track structured output from StructuredOutput tool calls
+      let structuredOutputFromTool: unknown
+      // Track the last stop_reason from assistant messages
+      let lastStopReason: string | null = null
+      // Reference-based watermark so error_during_execution's errors[] is
+      // turn-scoped. A length-based index breaks when the 100-entry ring buffer
+      // shift()s during the turn — the index slides. If this entry is rotated
+      // out, lastIndexOf returns -1 and we include everything (safe fallback).
+      const errorLogWatermark = getInMemoryErrors().at(-1)
+      // Snapshot count before this query for delta-based retry limiting
+      const initialStructuredOutputCalls = jsonSchema
+        ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
+        : 0
+
+      for await (const message of query({
+        messages,
+        systemPrompt,
+        userContext,
+        systemContext,
+        canUseTool: wrappedCanUseTool,
+        toolUseContext: processUserInputContext,
+        fallbackModel,
+        querySource: 'sdk',
+        traceTurnId,
+        maxTurns,
+        taskBudget,
+      })) {
+        // Record assistant, user, and compact boundary messages
+        if (
+          message.type === 'assistant' ||
+          message.type === 'user' ||
+          (message.type === 'system' && message.subtype === 'compact_boundary')
+        ) {
+          // Before writing a compact boundary, flush any in-memory-only
+          // messages up through the preservedSegment tail. Attachments and
+          // progress are now recorded inline (their switch cases below), but
+          // this flush still matters for the preservedSegment tail walk.
+          // If the SDK subprocess restarts before then (claude-desktop kills
+          // between turns), tailUuid points to a never-written message →
+          // applyPreservedSegmentRelinks fails its tail→head walk → returns
+          // without pruning → resume loads full pre-compact history.
+          if (
+            persistSession &&
+            message.type === 'system' &&
+            message.subtype === 'compact_boundary'
+          ) {
+            const compactMsg = message as SystemCompactBoundaryMessage
+            const tailUuid =
+              compactMsg.compactMetadata?.preservedSegment?.tailUuid
+            if (tailUuid) {
+              const tailIdx = this.mutableMessages.findLastIndex(
+                m => m.uuid === tailUuid,
+              )
+              if (tailIdx !== -1) {
+                await recordTranscript(
+                  this.mutableMessages.slice(0, tailIdx + 1),
+                )
+              }
+            }
+          }
+          messages.push(message as Message)
+          if (persistSession) {
+            // Fire-and-forget for assistant messages. claude.ts yields one
+            // assistant message per content block, then mutates the last
+            // one's message.usage/stop_reason on message_delta — relying on
+            // the write queue's 100ms lazy jsonStringify. Awaiting here
+            // blocks ask()'s generator, so message_delta can't run until
+            // every block is consumed; the drain timer (started at block 1)
+            // elapses first. Interactive CC doesn't hit this because
+            // useLogMessages.ts fire-and-forgets. enqueueWrite is
+            // order-preserving so fire-and-forget here is safe.
+            if (message.type === 'assistant') {
+              void recordTranscript(messages)
+            } else {
+              await recordTranscript(messages)
+            }
+          }
+
+          // Acknowledge initial user messages after first transcript recording
+          if (!hasAcknowledgedInitialMessages && messagesToAck.length > 0) {
+            hasAcknowledgedInitialMessages = true
+            for (const msgToAck of messagesToAck) {
+              if (msgToAck.type === 'user') {
+                yield {
+                  type: 'user',
+                  message: msgToAck.message,
+                  session_id: getSessionId(),
+                  parent_tool_use_id: null,
+                  uuid: msgToAck.uuid,
+                  timestamp: msgToAck.timestamp,
+                  isReplay: true,
+                } as unknown as SDKUserMessageReplay
+              }
+            }
+          }
+        }
+
+        if (message.type === 'user') {
+          turnCount++
+        }
+
+        switch (message.type) {
+          case 'tombstone':
+            // Tombstone messages are control signals for removing messages, skip them
+            break
+          case 'assistant': {
+            // Capture stop_reason if already set (synthetic messages). For
+            // streamed responses, this is null at content_block_stop time;
+            // the real value arrives via message_delta (handled below).
+            const msg = message as Message
+            const stopReason = msg.message?.stop_reason as
+              | string
+              | null
+              | undefined
+            if (stopReason != null) {
+              lastStopReason = stopReason
+            }
+            this.mutableMessages.push(msg)
+            yield* normalizeMessage(msg)
+            break
+          }
+          case 'progress': {
+            const msg = message as Message
+            this.mutableMessages.push(msg)
+            // Record inline so the dedup loop in the next ask() call sees it
+            // as already-recorded. Without this, deferred progress interleaves
+            // with already-recorded tool_results in mutableMessages, and the
+            // dedup walk freezes startingParentUuid at the wrong message —
+            // forking the chain and orphaning the conversation on resume.
+            if (persistSession) {
+              messages.push(msg)
+              void recordTranscript(messages)
+            }
+            yield* normalizeMessage(msg)
+            break
+          }
+          case 'user': {
+            const msg = message as Message
+            this.mutableMessages.push(msg)
+            yield* normalizeMessage(msg)
+            break
+          }
+          case 'stream_event': {
+            const event = (
+              message as unknown as { event: Record<string, unknown> }
+            ).event
+            if (event.type === 'message_start') {
+              // Reset current message usage for new message
+              currentMessageUsage = EMPTY_USAGE
+              const eventMessage = event.message as {
+                usage: BetaMessageDeltaUsage
+              }
+              currentMessageUsage = updateUsage(
+                currentMessageUsage,
+                eventMessage.usage,
+              )
+            }
+            if (event.type === 'message_delta') {
+              currentMessageUsage = updateUsage(
+                currentMessageUsage,
+                event.usage as BetaMessageDeltaUsage,
+              )
+              // Capture stop_reason from message_delta. The assistant message
+              // is yielded at content_block_stop with stop_reason=null; the
+              // real value only arrives here (see claude.ts message_delta
+              // handler). Without this, result.stop_reason is always null.
+              const delta = event.delta as { stop_reason?: string | null }
+              if (delta.stop_reason != null) {
+                lastStopReason = delta.stop_reason
+              }
+            }
+            if (event.type === 'message_stop') {
+              // Accumulate current message usage into total
+              this.totalUsage = accumulateUsage(
+                this.totalUsage,
+                currentMessageUsage,
+              )
+            }
+
+            if (includePartialMessages) {
+              yield {
+                type: 'stream_event' as const,
+                event,
+                session_id: getSessionId(),
+                parent_tool_use_id: null,
+                uuid: randomUUID(),
+              }
+            }
+
+            break
+          }
+          case 'attachment': {
+            const msg = message as Message
+            this.mutableMessages.push(msg)
+            // Record inline (same reason as progress above).
+            if (persistSession) {
+              messages.push(msg)
+              void recordTranscript(messages)
+            }
+
+            const attachment = msg.attachment as {
+              type: string
+              data?: unknown
+              turnCount?: number
+              maxTurns?: number
+              prompt?: string
+              source_uuid?: string
+              [key: string]: unknown
+            }
+
+            // Extract structured output from StructuredOutput tool calls
+            if (attachment.type === 'structured_output') {
+              structuredOutputFromTool = attachment.data
+            }
+            // Handle max turns reached signal from query.ts
+            else if (attachment.type === 'max_turns_reached') {
+              if (persistSession) {
+                if (
+                  isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
+                  isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
+                ) {
+                  await flushSessionStorage()
+                }
+              }
+              setTraceTurnOutcome({
+                success: false,
+                error: true,
+                resultSubtype: 'error_max_turns',
+                stopReason: lastStopReason,
+              })
+              yield {
+                type: 'result',
+                subtype: 'error_max_turns',
+                duration_ms: Date.now() - startTime,
+                duration_api_ms: getTotalAPIDuration(),
+                is_error: true,
+                num_turns: attachment.turnCount as number,
+                stop_reason: lastStopReason,
+                session_id: getSessionId(),
+                total_cost_usd: getTotalCost(),
+                usage: this.totalUsage,
+                modelUsage: getModelUsage(),
+                permission_denials: this.permissionDenials,
+                fast_mode_state: getFastModeState(
+                  mainLoopModel,
+                  initialAppState.fastMode,
+                ),
+                uuid: randomUUID(),
+                errors: [
+                  `Reached maximum number of turns (${attachment.maxTurns})`,
+                ],
+              }
+              return
+            }
+            // Yield queued_command attachments as SDK user message replays
+            else if (
+              replayUserMessages &&
+              attachment.type === 'queued_command'
+            ) {
+              yield {
+                type: 'user',
+                message: {
+                  role: 'user' as const,
+                  content: attachment.prompt,
+                },
+                session_id: getSessionId(),
+                parent_tool_use_id: null,
+                uuid: attachment.source_uuid || msg.uuid,
+                timestamp: msg.timestamp,
+                isReplay: true,
+              } as unknown as SDKUserMessageReplay
+            }
+            break
+          }
+          case 'stream_request_start':
+            // Don't yield stream request start messages
+            break
+          case 'system': {
+            const msg = message as Message
+            // Snip boundary: replay on our store to remove zombie messages and
+            // stale markers. The yielded boundary is a signal, not data to push —
+            // the replay produces its own equivalent boundary. Without this,
+            // markers persist and re-trigger on every turn, and mutableMessages
+            // never shrinks (memory leak in long SDK sessions). The subtype
+            // check lives inside the injected callback so feature-gated strings
+            // stay out of this file (excluded-strings check).
+            const snipResult = this.config.snipReplay?.(
+              msg,
+              this.mutableMessages,
+            )
+            if (snipResult !== undefined) {
+              if (snipResult.executed) {
+                this.mutableMessages.length = 0
+                this.mutableMessages.push(...snipResult.messages)
+              }
+              break
+            }
+            this.mutableMessages.push(msg)
+            // Yield compact boundary messages to SDK
+            if (msg.subtype === 'compact_boundary' && msg.compactMetadata) {
+              const compactMsg = msg as SystemCompactBoundaryMessage
+              // Release pre-compaction messages for GC. The boundary was just
+              // pushed so it's the last element. query.ts already uses
+              // getMessagesAfterCompactBoundary() internally, so only
+              // post-boundary messages are needed going forward.
+              const mutableBoundaryIdx = this.mutableMessages.length - 1
+              if (mutableBoundaryIdx > 0) {
+                this.mutableMessages.splice(0, mutableBoundaryIdx)
+              }
+              const localBoundaryIdx = messages.length - 1
+              if (localBoundaryIdx > 0) {
+                messages.splice(0, localBoundaryIdx)
+              }
+
+              yield {
+                type: 'system',
+                subtype: 'compact_boundary' as const,
+                session_id: getSessionId(),
+                uuid: msg.uuid,
+                compact_metadata: toSDKCompactMetadata(
+                  compactMsg.compactMetadata,
+                ),
+              }
+            }
+            if (msg.subtype === 'api_error') {
+              const apiErrorMsg = msg as Message & {
+                retryAttempt: number
+                maxRetries: number
+                retryInMs: number
+                error: APIError
+              }
+              yield {
+                type: 'system',
+                subtype: 'api_retry' as const,
+                attempt: apiErrorMsg.retryAttempt,
+                max_retries: apiErrorMsg.maxRetries,
+                retry_delay_ms: apiErrorMsg.retryInMs,
+                error_status: apiErrorMsg.error.status ?? null,
+                error: categorizeRetryableAPIError(apiErrorMsg.error),
+                session_id: getSessionId(),
+                uuid: msg.uuid,
+              }
+            }
+            // Don't yield other system messages in headless mode
+            break
+          }
+          case 'tool_use_summary': {
+            const msg = message as Message & {
+              summary: unknown
+              precedingToolUseIds: unknown
+            }
+            // Yield tool use summary messages to SDK
+            yield {
+              type: 'tool_use_summary' as const,
+              summary: msg.summary,
+              preceding_tool_use_ids: msg.precedingToolUseIds,
+              session_id: getSessionId(),
+              uuid: msg.uuid,
+            }
+            break
+          }
+        }
+
+        // Check if USD budget has been exceeded
+        if (maxBudgetUsd !== undefined && getTotalCost() >= maxBudgetUsd) {
           if (persistSession) {
             if (
               isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
@@ -1074,9 +1140,15 @@ export class QueryEngine {
               await flushSessionStorage()
             }
           }
+          setTraceTurnOutcome({
+            success: false,
+            error: true,
+            resultSubtype: 'error_max_budget_usd',
+            stopReason: lastStopReason,
+          })
           yield {
             type: 'result',
-            subtype: 'error_max_structured_output_retries',
+            subtype: 'error_max_budget_usd',
             duration_ms: Date.now() - startTime,
             duration_api_ms: getTotalAPIDuration(),
             is_error: true,
@@ -1093,124 +1165,213 @@ export class QueryEngine {
             ),
             uuid: randomUUID(),
             errors: [
-              `Failed to provide valid structured output after ${maxRetries} attempts`,
+              `Reached maximum budget ($${maxBudgetUsd}). Increase the limit with --max-budget-usd or start a new session.`,
             ],
           }
           return
         }
+
+        // Check if structured output retry limit exceeded (only on user messages)
+        if (message.type === 'user' && jsonSchema) {
+          const currentCalls = countToolCalls(
+            this.mutableMessages,
+            SYNTHETIC_OUTPUT_TOOL_NAME,
+          )
+          const callsThisQuery = currentCalls - initialStructuredOutputCalls
+          const maxRetries = parseInt(
+            process.env.MAX_STRUCTURED_OUTPUT_RETRIES || '5',
+            10,
+          )
+          if (callsThisQuery >= maxRetries) {
+            if (persistSession) {
+              if (
+                isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
+                isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
+              ) {
+                await flushSessionStorage()
+              }
+            }
+            setTraceTurnOutcome({
+              success: false,
+              error: true,
+              resultSubtype: 'error_max_structured_output_retries',
+              stopReason: lastStopReason,
+            })
+            yield {
+              type: 'result',
+              subtype: 'error_max_structured_output_retries',
+              duration_ms: Date.now() - startTime,
+              duration_api_ms: getTotalAPIDuration(),
+              is_error: true,
+              num_turns: turnCount,
+              stop_reason: lastStopReason,
+              session_id: getSessionId(),
+              total_cost_usd: getTotalCost(),
+              usage: this.totalUsage,
+              modelUsage: getModelUsage(),
+              permission_denials: this.permissionDenials,
+              fast_mode_state: getFastModeState(
+                mainLoopModel,
+                initialAppState.fastMode,
+              ),
+              uuid: randomUUID(),
+              errors: [
+                `Failed to provide valid structured output after ${maxRetries} attempts`,
+              ],
+            }
+            return
+          }
+        }
       }
-    }
 
-    // Stop hooks yield progress/attachment messages AFTER the assistant
-    // response (via yield* handleStopHooks in query.ts). Since #23537 pushes
-    // those to `messages` inline, last(messages) can be a progress/attachment
-    // instead of the assistant — which makes textResult extraction below
-    // return '' and -p mode emit a blank line. Allowlist to assistant|user:
-    // isResultSuccessful handles both (user with all tool_result blocks is a
-    // valid successful terminal state).
-    const result = messages.findLast(
-      m => m.type === 'assistant' || m.type === 'user',
-    )
-    // Capture for the error_during_execution diagnostic — isResultSuccessful
-    // is a type predicate (message is Message), so inside the false branch
-    // `result` narrows to never and these accesses don't typecheck.
-    const edeResultType = result?.type ?? 'undefined'
-    const edeLastContentType =
-      result?.type === 'assistant'
-        ? (last(
-            result.message!
-              .content as import('@anthropic-ai/sdk/resources/beta/messages/messages.js').BetaContentBlock[],
-          )?.type ?? 'none')
-        : 'n/a'
+      // Stop hooks yield progress/attachment messages AFTER the assistant
+      // response (via yield* handleStopHooks in query.ts). Since #23537 pushes
+      // those to `messages` inline, last(messages) can be a progress/attachment
+      // instead of the assistant — which makes textResult extraction below
+      // return '' and -p mode emit a blank line. Allowlist to assistant|user:
+      // isResultSuccessful handles both (user with all tool_result blocks is a
+      // valid successful terminal state).
+      const result = messages.findLast(
+        m => m.type === 'assistant' || m.type === 'user',
+      )
+      // Capture for the error_during_execution diagnostic — isResultSuccessful
+      // is a type predicate (message is Message), so inside the false branch
+      // `result` narrows to never and these accesses don't typecheck.
+      const edeResultType = result?.type ?? 'undefined'
+      const edeLastContentType =
+        result?.type === 'assistant'
+          ? (last(
+              result.message!
+                .content as import('@anthropic-ai/sdk/resources/beta/messages/messages.js').BetaContentBlock[],
+            )?.type ?? 'none')
+          : 'n/a'
 
-    // Flush buffered transcript writes before yielding result.
-    // The desktop app kills the CLI process immediately after receiving the
-    // result message, so any unflushed writes would be lost.
-    if (persistSession) {
-      if (
-        isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
-        isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
-      ) {
-        await flushSessionStorage()
+      // Flush buffered transcript writes before yielding result.
+      // The desktop app kills the CLI process immediately after receiving the
+      // result message, so any unflushed writes would be lost.
+      if (persistSession) {
+        if (
+          isEnvTruthy(process.env.CLAUDE_CODE_EAGER_FLUSH) ||
+          isEnvTruthy(process.env.CLAUDE_CODE_IS_COWORK)
+        ) {
+          await flushSessionStorage()
+        }
       }
-    }
 
-    if (!isResultSuccessful(result, lastStopReason)) {
+      if (!isResultSuccessful(result, lastStopReason)) {
+        setTraceTurnOutcome({
+          success: false,
+          error: true,
+          resultSubtype: 'error_during_execution',
+          stopReason: lastStopReason,
+        })
+        yield {
+          type: 'result',
+          subtype: 'error_during_execution',
+          duration_ms: Date.now() - startTime,
+          duration_api_ms: getTotalAPIDuration(),
+          is_error: true,
+          num_turns: turnCount,
+          stop_reason: lastStopReason,
+          session_id: getSessionId(),
+          total_cost_usd: getTotalCost(),
+          usage: this.totalUsage,
+          modelUsage: getModelUsage(),
+          permission_denials: this.permissionDenials,
+          fast_mode_state: getFastModeState(
+            mainLoopModel,
+            initialAppState.fastMode,
+          ),
+          uuid: randomUUID(),
+          // Diagnostic prefix: these are what isResultSuccessful() checks — if
+          // the result type isn't assistant-with-text/thinking or user-with-
+          // tool_result, and stop_reason isn't end_turn, that's why this fired.
+          // errors[] is turn-scoped via the watermark; previously it dumped the
+          // entire process's logError buffer (ripgrep timeouts, ENOENT, etc).
+          errors: (() => {
+            const all = getInMemoryErrors()
+            const start = errorLogWatermark
+              ? all.lastIndexOf(errorLogWatermark) + 1
+              : 0
+            return [
+              `[ede_diagnostic] result_type=${edeResultType} last_content_type=${edeLastContentType} stop_reason=${lastStopReason}`,
+              ...all.slice(start).map(_ => _.error),
+            ]
+          })(),
+        }
+        return
+      }
+
+      // Extract the text result based on message type
+      let textResult = ''
+      let isApiError = false
+
+      if (result.type === 'assistant') {
+        const lastContent = last(
+          result.message!
+            .content as import('@anthropic-ai/sdk/resources/beta/messages/messages.js').BetaContentBlock[],
+        )
+        if (
+          lastContent?.type === 'text' &&
+          !SYNTHETIC_MESSAGES.has(lastContent.text)
+        ) {
+          textResult = lastContent.text
+        }
+        isApiError = Boolean(result.isApiErrorMessage)
+      }
+
+      setTraceTurnOutcome({
+        success: !isApiError,
+        error: isApiError,
+        resultSubtype: 'success',
+        stopReason: lastStopReason,
+      })
       yield {
         type: 'result',
-        subtype: 'error_during_execution',
+        subtype: 'success',
+        is_error: isApiError,
         duration_ms: Date.now() - startTime,
         duration_api_ms: getTotalAPIDuration(),
-        is_error: true,
         num_turns: turnCount,
+        result: textResult,
         stop_reason: lastStopReason,
         session_id: getSessionId(),
         total_cost_usd: getTotalCost(),
         usage: this.totalUsage,
         modelUsage: getModelUsage(),
         permission_denials: this.permissionDenials,
+        structured_output: structuredOutputFromTool,
         fast_mode_state: getFastModeState(
           mainLoopModel,
           initialAppState.fastMode,
         ),
         uuid: randomUUID(),
-        // Diagnostic prefix: these are what isResultSuccessful() checks — if
-        // the result type isn't assistant-with-text/thinking or user-with-
-        // tool_result, and stop_reason isn't end_turn, that's why this fired.
-        // errors[] is turn-scoped via the watermark; previously it dumped the
-        // entire process's logError buffer (ripgrep timeouts, ENOENT, etc).
-        errors: (() => {
-          const all = getInMemoryErrors()
-          const start = errorLogWatermark
-            ? all.lastIndexOf(errorLogWatermark) + 1
-            : 0
-          return [
-            `[ede_diagnostic] result_type=${edeResultType} last_content_type=${edeLastContentType} stop_reason=${lastStopReason}`,
-            ...all.slice(start).map(_ => _.error),
-          ]
-        })(),
       }
-      return
-    }
-
-    // Extract the text result based on message type
-    let textResult = ''
-    let isApiError = false
-
-    if (result.type === 'assistant') {
-      const lastContent = last(
-        result.message!
-          .content as import('@anthropic-ai/sdk/resources/beta/messages/messages.js').BetaContentBlock[],
-      )
-      if (
-        lastContent?.type === 'text' &&
-        !SYNTHETIC_MESSAGES.has(lastContent.text)
-      ) {
-        textResult = lastContent.text
+    } catch (error) {
+      traceTurnSuccess = false
+      traceTurnError = true
+      traceTurnErrorName = error instanceof Error ? error.name : typeof error
+      throw error
+    } finally {
+      if (traceTurnStarted) {
+        if (feature('HARNESS_TRACE')) {
+          emitTrace({
+            source: 'query',
+            type: 'turn.end',
+            turnId: traceTurnId,
+            payload: {
+              durationMs: Date.now() - startTime,
+              success: traceTurnSuccess,
+              error: traceTurnError,
+              aborted: this.abortController.signal.aborted,
+              resultSubtype: traceTurnResultSubtype,
+              stopReason: traceTurnStopReason,
+              finalMessageCount: this.mutableMessages.length,
+              ...(traceTurnErrorName ? { errorName: traceTurnErrorName } : {}),
+            },
+          })
+        }
       }
-      isApiError = Boolean(result.isApiErrorMessage)
-    }
-
-    yield {
-      type: 'result',
-      subtype: 'success',
-      is_error: isApiError,
-      duration_ms: Date.now() - startTime,
-      duration_api_ms: getTotalAPIDuration(),
-      num_turns: turnCount,
-      result: textResult,
-      stop_reason: lastStopReason,
-      session_id: getSessionId(),
-      total_cost_usd: getTotalCost(),
-      usage: this.totalUsage,
-      modelUsage: getModelUsage(),
-      permission_denials: this.permissionDenials,
-      structured_output: structuredOutputFromTool,
-      fast_mode_state: getFastModeState(
-        mainLoopModel,
-        initialAppState.fastMode,
-      ),
-      uuid: randomUUID(),
     }
   }
 
