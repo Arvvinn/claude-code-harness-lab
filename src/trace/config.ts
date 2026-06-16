@@ -1,4 +1,11 @@
-import { existsSync, readFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs'
+import { dirname } from 'node:path'
 import { getTraceConfigPath } from './paths.js'
 import type { TraceConfig, TraceMode } from './types.js'
 
@@ -25,6 +32,18 @@ export function loadTraceConfig(): TraceConfig {
   } catch {
     return { ...DEFAULT_TRACE_CONFIG }
   }
+}
+
+export function saveTraceConfig(config: TraceConfig): void {
+  if (!isTraceConfig(config)) {
+    throw new Error('Invalid trace config')
+  }
+
+  const configPath = getTraceConfigPath()
+  const tempPath = `${configPath}.${process.pid}.${Date.now()}.tmp`
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`)
+  renameSync(tempPath, configPath)
 }
 
 function isTraceConfig(value: unknown): value is TraceConfig {

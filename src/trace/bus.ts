@@ -37,6 +37,25 @@ export function getTraceMode(): TraceMode {
   return loadTraceConfig().mode
 }
 
+export function getActiveTraceSessionForProcess(): {
+  sessionId: string
+  mode: ActiveTraceMode
+  eventsPath: string
+} | null {
+  if (activeTrace === null) {
+    return null
+  }
+
+  return {
+    ...activeTrace,
+    eventsPath: getTraceEventsPath(activeTrace.sessionId),
+  }
+}
+
+export function isTraceSessionActive(): boolean {
+  return activeTrace !== null
+}
+
 export function startTraceSession(input: {
   sessionId: string
   cwd: string
