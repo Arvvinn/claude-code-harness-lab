@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { feature } from 'bun:bundle'
 import type { AssistantMessage } from '../../types/message'
+import type { Terminal } from '../../query/transitions'
 import type { TraceConfig } from '../types'
 
 const { resetStateForTests, setCwdState, setOriginalCwd, setProjectRoot } =
@@ -201,6 +202,56 @@ if (feature('HARNESS_TRACE')) {
       })
       expect(JSON.stringify(events)).not.toContain(rawPrompt)
     })
+
+    test('counts synthetic assistant error messages in direct query turn end metadata', async () => {
+      startTraceSession({
+        sessionId: 'session-query-direct-model-error',
+        cwd: traceDir,
+        argv: ['claude'],
+      })
+
+      const deps = {
+        uuid: () => 'query-chain-id',
+        microcompact: async (messages: unknown[]) => ({ messages }),
+        autocompact: async () => ({
+          compactionResult: undefined,
+          consecutiveFailures: 0,
+        }),
+        callModel: async function* () {
+          yield* [] as AssistantMessage[]
+          throw new Error('synthetic model failure')
+        },
+      }
+
+      const generator = query({
+        messages: [createUserMessage({ content: 'direct model error prompt' })],
+        systemPrompt: asSystemPrompt([]),
+        userContext: {},
+        systemContext: {},
+        canUseTool: async (_tool, input) => ({
+          behavior: 'allow',
+          updatedInput: input,
+        }),
+        toolUseContext: createToolUseContext(),
+        querySource: 'repl_main_thread',
+        deps: deps as never,
+      })
+
+      const terminal = await drainQuery(generator)
+      await flushTraceForTesting()
+
+      const events = readTraceEvents('session-query-direct-model-error')
+      const turnEndEvent = events.find(event => event.type === 'turn.end')
+
+      expect(terminal.reason).toBe('model_error')
+      expect(turnEndEvent?.payload).toMatchObject({
+        success: false,
+        error: true,
+        aborted: false,
+        stopReason: 'model_error',
+        finalMessageCount: 2,
+      })
+    })
   })
 } else {
   describe('query trace instrumentation', () => {
@@ -210,11 +261,14 @@ if (feature('HARNESS_TRACE')) {
   })
 }
 
-async function drainQuery(generator: ReturnType<typeof query>): Promise<void> {
+async function drainQuery(
+  generator: ReturnType<typeof query>,
+): Promise<Terminal> {
   let next = await generator.next()
   while (!next.done) {
     next = await generator.next()
   }
+  return next.value
 }
 
 function createAssistantMessage(): AssistantMessage {
