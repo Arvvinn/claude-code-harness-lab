@@ -114,4 +114,34 @@ describe('launchTraceTailWindow', () => {
       reason: 'launch_failed',
     })
   })
+
+  test('does not mark failed launches as already launched', async () => {
+    const calls: Array<{ executable: string; args: string[] }> = []
+    resetTraceTailWindowForTesting()
+    setTraceTailWindowSpawnForTesting(async (executable, args) => {
+      calls.push({ executable, args })
+      return { ok: false, error: new Error('missing terminal') }
+    })
+
+    const first = await launchTraceTailWindow({
+      config: { mode: 'learn', autoTailWindow: true },
+      platform: 'linux',
+    })
+    const second = await launchTraceTailWindow({
+      config: { mode: 'learn', autoTailWindow: true },
+      platform: 'linux',
+    })
+
+    expect(first).toMatchObject({
+      ok: false,
+      command: TRACE_TAIL_COMMAND,
+      reason: 'launch_failed',
+    })
+    expect(second).toMatchObject({
+      ok: false,
+      command: TRACE_TAIL_COMMAND,
+      reason: 'launch_failed',
+    })
+    expect(calls).toHaveLength(6)
+  })
 })

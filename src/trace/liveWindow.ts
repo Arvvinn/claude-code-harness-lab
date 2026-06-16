@@ -39,7 +39,7 @@ interface LauncherCandidate {
   args: string[]
 }
 
-let launchAttempted = false
+let launchSucceeded = false
 let spawnForTesting: TraceTailWindowSpawn | null = null
 
 export async function launchTraceTailWindow(
@@ -63,7 +63,7 @@ export async function launchTraceTailWindow(
     }
   }
 
-  if (launchAttempted) {
+  if (launchSucceeded) {
     return {
       ok: true,
       command: TRACE_TAIL_COMMAND,
@@ -81,8 +81,6 @@ export async function launchTraceTailWindow(
     }
   }
 
-  launchAttempted = true
-
   const spawnDetached = spawnForTesting ?? spawnDetachedProcess
   let lastError: unknown
 
@@ -90,6 +88,7 @@ export async function launchTraceTailWindow(
     const result = await spawnDetached(candidate.executable, candidate.args)
 
     if (result.ok) {
+      launchSucceeded = true
       return {
         ok: true,
         command: TRACE_TAIL_COMMAND,
@@ -115,7 +114,7 @@ export function setTraceTailWindowSpawnForTesting(
 }
 
 export function resetTraceTailWindowForTesting(): void {
-  launchAttempted = false
+  launchSucceeded = false
   spawnForTesting = null
 }
 
