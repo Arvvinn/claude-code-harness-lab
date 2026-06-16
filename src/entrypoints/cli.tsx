@@ -156,6 +156,17 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Fast-path for `claude trace ...`: local JSONL harness trace viewer.
+  if (args[0] === 'trace') {
+    if (feature('HARNESS_TRACE')) {
+      profileCheckpoint('cli_trace_path');
+      const { traceMain } = await import('../trace/cli.js');
+      const exitCode = await traceMain(args.slice(1));
+      // eslint-disable-next-line custom-rules/no-process-exit
+      process.exit(exitCode);
+    }
+  }
+
   // Fast-path for `--daemon-worker=<kind>` (internal — supervisor spawns this).
   // Must come before the daemon subcommand check: spawned per-worker, so
   // perf-sensitive. No enableConfigs(), no analytics sinks at this layer —
