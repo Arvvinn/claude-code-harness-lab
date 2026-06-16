@@ -11,6 +11,7 @@ import {
   getTraceMode,
   resetTraceForTesting,
   startTraceSession,
+  updateActiveTraceModeFromConfig,
 } from '../bus.js'
 import {
   getTraceConfigPath,
@@ -137,6 +138,53 @@ describe('TraceBus', () => {
     expect(events[1].payload).toEqual({
       Authorization: '[REDACTED]',
       nested: { apiKey: '[REDACTED]', visible: 'kept' },
+    })
+  })
+
+  test('updates active session mode from config without restarting sequence', async () => {
+    await writeTraceConfig({ mode: 'learn', autoTailWindow: true })
+
+    startTraceSession({
+      sessionId: 'session-mode-switch',
+      cwd: 'C:\\workspace',
+      argv: ['ccb'],
+    })
+    await flushTraceForTesting()
+
+    const before = getActiveTraceSessionForProcess()
+    expect(before).toMatchObject({
+      sessionId: 'session-mode-switch',
+      mode: 'learn',
+    })
+
+    await writeTraceConfig({ mode: 'full', autoTailWindow: true })
+    updateActiveTraceModeFromConfig()
+
+    const after = getActiveTraceSessionForProcess()
+    expect(after).toMatchObject({
+      sessionId: 'session-mode-switch',
+      mode: 'full',
+    })
+    expect(after?.eventsPath).toBe(before?.eventsPath)
+
+    const fullOnlyText = 'x'.repeat(600)
+    emitTrace({
+      source: 'api',
+      type: 'api.request_built',
+      payload: { fullOnlyText },
+    })
+    await flushTraceForTesting()
+
+    const events = readTraceEvents('session-mode-switch')
+    expect(events.map(event => event.type)).toEqual([
+      'trace.session_start',
+      'api.request_built',
+    ])
+    expect(events.map(event => event.sequence)).toEqual([1, 2])
+    expect(events[1]).toMatchObject({
+      sessionId: 'session-mode-switch',
+      mode: 'full',
+      payload: { fullOnlyText },
     })
   })
 

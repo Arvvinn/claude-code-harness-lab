@@ -3,7 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
+  emitTrace,
   flushTraceForTesting,
+  getActiveTraceSessionForProcess,
   resetTraceForTesting,
 } from '../../../trace/bus.js'
 import { loadTraceConfig } from '../../../trace/config.js'
@@ -108,6 +110,42 @@ describe('/trace command', () => {
     expect(result).toEqual({
       type: 'display',
       value: expect.stringContaining('Events: none'),
+    })
+  })
+
+  test('full updates an active learn session without restarting it', async () => {
+    const { call } = await import('../trace.js')
+
+    await call('learn', makeContext())
+    await flushTraceForTesting()
+    const before = getActiveTraceSessionForProcess()
+    expect(before).toMatchObject({ mode: 'learn' })
+
+    await call('full', makeContext())
+    const after = getActiveTraceSessionForProcess()
+    expect(after).toMatchObject({
+      sessionId: before?.sessionId,
+      mode: 'full',
+    })
+    expect(after?.eventsPath).toBe(before?.eventsPath)
+
+    const fullOnlyText = 'x'.repeat(600)
+    emitTrace({
+      source: 'api',
+      type: 'api.request_built',
+      payload: { fullOnlyText },
+    })
+    await flushTraceForTesting()
+
+    const events = readTraceEvents(before!.sessionId)
+    expect(events.map(event => event.type)).toEqual([
+      'trace.session_start',
+      'api.request_built',
+    ])
+    expect(events.map(event => event.sequence)).toEqual([1, 2])
+    expect(events[1]).toMatchObject({
+      mode: 'full',
+      payload: { fullOnlyText },
     })
   })
 

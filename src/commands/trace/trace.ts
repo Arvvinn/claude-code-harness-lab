@@ -6,6 +6,7 @@ import {
   getTraceMode,
   isTraceSessionActive,
   startTraceSession,
+  updateActiveTraceModeFromConfig,
 } from '../../trace/bus.js'
 import { loadTraceConfig, saveTraceConfig } from '../../trace/config.js'
 import {
@@ -34,6 +35,7 @@ export const call: LocalCommandCall = async args => {
     case 'learn':
     case 'full':
       saveTraceConfig({ ...loadTraceConfig(), mode: action })
+      updateActiveTraceModeFromConfig()
       startCurrentTraceSessionIfNeeded()
       return {
         type: 'display',

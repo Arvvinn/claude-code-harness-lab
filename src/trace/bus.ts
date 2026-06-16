@@ -60,6 +60,23 @@ export function isTraceSessionActive(): boolean {
   return activeTrace !== null
 }
 
+export function updateActiveTraceModeFromConfig(): void {
+  if (activeTrace === null || disabled) {
+    return
+  }
+
+  const mode = getTraceMode()
+
+  if (mode === 'off') {
+    return
+  }
+
+  activeTrace = {
+    ...activeTrace,
+    mode,
+  }
+}
+
 export function startTraceSession(input: {
   sessionId: string
   cwd: string
