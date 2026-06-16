@@ -15,8 +15,11 @@ describe('redactTracePayload', () => {
   })
 
   test('keeps learner payloads short', () => {
-    const result = redactTracePayload({ text: 'x'.repeat(900) }, 'learn')
-    expect((result as { text: string }).text.length).toBeLessThanOrEqual(520)
+    const value = `${'x'.repeat(500)}tail`
+    const result = redactTracePayload({ text: value }, 'learn')
+
+    expect((result as { text: string }).text).toHaveLength(500)
+    expect((result as { text: string }).text).toBe('x'.repeat(500))
   })
 
   test('redacts bearer and basic strings under generic keys', () => {
@@ -60,7 +63,48 @@ describe('redactTracePayload', () => {
   })
 
   test('caps full payload strings', () => {
-    const result = redactTracePayload({ text: 'x'.repeat(21000) }, 'full')
-    expect((result as { text: string }).text.length).toBeLessThanOrEqual(20020)
+    const value = `${'x'.repeat(20000)}tail`
+    const result = redactTracePayload({ text: value }, 'full')
+
+    expect((result as { text: string }).text).toHaveLength(20000)
+    expect((result as { text: string }).text).toBe('x'.repeat(20000))
+  })
+
+  test('does not mutate source objects', () => {
+    const payload = {
+      token: 'secret-token',
+      nested: { text: `${'x'.repeat(500)}tail` },
+    }
+
+    expect(redactTracePayload(payload, 'learn')).toEqual({
+      token: '[REDACTED]',
+      nested: { text: 'x'.repeat(500) },
+    })
+    expect(payload).toEqual({
+      token: 'secret-token',
+      nested: { text: `${'x'.repeat(500)}tail` },
+    })
+  })
+
+  test('handles deeply nested objects without using the call stack', () => {
+    const payload: { child?: unknown } = {}
+    let cursor = payload
+
+    for (let depth = 0; depth < 20000; depth += 1) {
+      const child: { child?: unknown } = {}
+      cursor.child = child
+      cursor = child
+    }
+
+    cursor.child = { token: 'secret-token' }
+
+    const result = redactTracePayload(payload, 'full')
+    let resultCursor = result as { child?: unknown }
+
+    for (let depth = 0; depth < 20000; depth += 1) {
+      resultCursor = resultCursor.child as { child?: unknown }
+    }
+
+    expect(resultCursor.child).toEqual({ token: '[REDACTED]' })
   })
 })

@@ -16,17 +16,74 @@ const SECRET_KEYS = new Set([
 
 const AUTH_VALUE_PATTERN = /^(bearer|basic)\s+\S+/i
 
+type ObjectFrame = {
+  entries: [string, unknown][]
+  index: number
+  source: object
+  target: Record<string, unknown>
+  type: 'object'
+}
+
+type ArrayFrame = {
+  index: number
+  source: object
+  sourceArray: unknown[]
+  target: unknown[]
+  type: 'array'
+}
+
+type Frame = ArrayFrame | ObjectFrame
+
 export function redactTracePayload(
   value: unknown,
   mode: ActiveTraceMode,
 ): unknown {
-  return redactValue(value, mode, new WeakSet<object>())
+  const seen = new WeakSet<object>()
+  const stack: Frame[] = []
+  const root = prepareValue(value, mode, seen, stack)
+
+  while (stack.length > 0) {
+    const frame = stack[stack.length - 1]
+
+    if (frame.type === 'array') {
+      if (frame.index >= frame.sourceArray.length) {
+        seen.delete(frame.source)
+        stack.pop()
+        continue
+      }
+
+      const index = frame.index
+      frame.index += 1
+      frame.target[index] = prepareValue(
+        frame.sourceArray[index],
+        mode,
+        seen,
+        stack,
+      )
+      continue
+    }
+
+    if (frame.index >= frame.entries.length) {
+      seen.delete(frame.source)
+      stack.pop()
+      continue
+    }
+
+    const [key, childValue] = frame.entries[frame.index]
+    frame.index += 1
+    frame.target[key] = shouldRedactKey(key)
+      ? REDACTED
+      : prepareValue(childValue, mode, seen, stack)
+  }
+
+  return root
 }
 
-function redactValue(
+function prepareValue(
   value: unknown,
   mode: ActiveTraceMode,
   seen: WeakSet<object>,
+  stack: Frame[],
 ): unknown {
   if (typeof value === 'string') {
     return redactString(value, mode)
@@ -43,22 +100,25 @@ function redactValue(
   seen.add(value)
 
   if (Array.isArray(value)) {
-    const result = value.map(item => redactValue(item, mode, seen))
-    seen.delete(value)
-    return result
+    const target: unknown[] = []
+    stack.push({
+      index: 0,
+      source: value,
+      sourceArray: value,
+      target,
+      type: 'array',
+    })
+    return target
   }
 
   const result: Record<string, unknown> = {}
-
-  for (const [key, childValue] of Object.entries(
-    value as Record<string, unknown>,
-  )) {
-    result[key] = shouldRedactKey(key)
-      ? REDACTED
-      : redactValue(childValue, mode, seen)
-  }
-
-  seen.delete(value)
+  stack.push({
+    entries: Object.entries(value as Record<string, unknown>),
+    index: 0,
+    source: value,
+    target: result,
+    type: 'object',
+  })
   return result
 }
 
