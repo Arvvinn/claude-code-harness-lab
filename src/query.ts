@@ -323,6 +323,10 @@ type State = {
   transition: Continue | undefined
 }
 
+type HarnessTraceQueryLoopMetadata = {
+  finalMessageCount: number
+}
+
 export async function* query(
   params: QueryParams,
 ): AsyncGenerator<
@@ -366,6 +370,7 @@ export async function* query(
   // Minimal finally bridge for direct query turn boundaries. Assigned only
   // inside the HARNESS_TRACE guard; when the feature is off it remains unset.
   let harnessTraceOwner: { turnId: string; startedAt: number } | undefined
+  let harnessTraceLoopMetadata: HarnessTraceQueryLoopMetadata | undefined
   if (feature('HARNESS_TRACE')) {
     let traceTurnId = params.traceTurnId
     if (isTraceSessionActive()) {
@@ -374,6 +379,9 @@ export async function* query(
         harnessTraceOwner = {
           turnId: traceTurnId,
           startedAt: Date.now(),
+        }
+        harnessTraceLoopMetadata = {
+          finalMessageCount: params.messages.length,
         }
         const messageCount = params.messages.length
         const userMessageCount = getTraceMessageTypeCount(
@@ -430,6 +438,7 @@ export async function* query(
       paramsForQuery,
       consumedCommandUuids,
       consumedAutonomyCommands,
+      harnessTraceLoopMetadata,
     )
   } catch (error) {
     didThrow = true
@@ -464,7 +473,9 @@ export async function* query(
             aborted: isAborted,
             resultReason: terminal?.reason ?? (didThrow ? 'thrown' : null),
             stopReason: terminal?.reason ?? null,
-            finalMessageCount: paramsForQuery.messages.length,
+            finalMessageCount:
+              harnessTraceLoopMetadata?.finalMessageCount ??
+              paramsForQuery.messages.length,
             ...(errorName ? { errorName } : {}),
           },
         })
@@ -538,6 +549,7 @@ async function* queryLoop(
   params: QueryParams,
   consumedCommandUuids: string[],
   consumedAutonomyCommands: QueuedCommand[],
+  harnessTraceLoopMetadata?: HarnessTraceQueryLoopMetadata,
 ): AsyncGenerator<
   | StreamEvent
   | RequestStartEvent
@@ -2302,6 +2314,12 @@ async function* queryLoop(
       throw error
     } finally {
       if (feature('HARNESS_TRACE')) {
+        if (harnessTraceLoopMetadata !== undefined) {
+          harnessTraceLoopMetadata.finalMessageCount =
+            state.messages === messages
+              ? messages.length + assistantMessages.length + toolResults.length
+              : state.messages.length
+        }
         emitTrace({
           source: 'query',
           type: 'query.loop_end',

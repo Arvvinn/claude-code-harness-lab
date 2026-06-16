@@ -197,6 +197,7 @@ if (feature('HARNESS_TRACE')) {
         error: false,
         aborted: false,
         stopReason: 'completed',
+        finalMessageCount: 2,
       })
       expect(JSON.stringify(events)).not.toContain(rawPrompt)
     })
