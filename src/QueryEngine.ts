@@ -270,8 +270,6 @@ export class QueryEngine {
 
     this.discoveredSkillNames.clear()
     this.permissionDenials = []
-    setCwd(cwd)
-    const persistSession = !isSessionPersistenceDisabled()
     const startTime = Date.now()
     let traceTurnId: string | undefined
     let traceTurnStarted: boolean | undefined
@@ -283,22 +281,25 @@ export class QueryEngine {
 
     try {
       if (feature('HARNESS_TRACE')) {
-        traceTurnStarted = true
-        if (traceTurnId === undefined && isTraceSessionActive()) {
+        if (isTraceSessionActive()) {
+          traceTurnStarted = true
           traceTurnId = randomUUID()
+          emitTrace({
+            source: 'query',
+            type: 'turn.start',
+            turnId: traceTurnId,
+            payload: {
+              inputSource: getTraceInputSource(),
+              inputMode: 'prompt',
+              promptKind: typeof prompt === 'string' ? 'text' : 'blocks',
+              messageCountBefore: this.mutableMessages.length,
+            },
+          })
         }
-        emitTrace({
-          source: 'query',
-          type: 'turn.start',
-          turnId: traceTurnId,
-          payload: {
-            inputSource: getTraceInputSource(),
-            inputMode: 'prompt',
-            promptKind: typeof prompt === 'string' ? 'text' : 'blocks',
-            messageCountBefore: this.mutableMessages.length,
-          },
-        })
       }
+
+      setCwd(cwd)
+      const persistSession = !isSessionPersistenceDisabled()
 
       // Wrap canUseTool to track permission denials
       const wrappedCanUseTool: CanUseToolFn = async (

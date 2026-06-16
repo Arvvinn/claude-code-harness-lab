@@ -87,9 +87,10 @@ if (feature('HARNESS_TRACE')) {
 
   function createQueryEngine(
     customSystemPrompt: string,
+    cwd = traceDir,
   ): InstanceType<typeof QueryEngine> {
     return new QueryEngine({
-      cwd: traceDir,
+      cwd,
       tools: [],
       commands: [],
       mcpClients: [],
@@ -242,6 +243,49 @@ if (feature('HARNESS_TRACE')) {
       })
       expect(JSON.stringify(boundaryEvents)).not.toContain(rawPrompt)
       expect(JSON.stringify(boundaryEvents)).not.toContain(systemPromptText)
+    })
+
+    test('emits turn boundaries when cwd setup throws before normal setup', async () => {
+      startTraceSession({
+        sessionId: 'session-query-engine-cwd-error',
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+
+      const missingCwd = join(traceDir, 'missing-cwd')
+      const engine = createQueryEngine('test system prompt', missingCwd)
+
+      const rawPrompt = 'raw prompt must not appear in cwd boundary payloads'
+      await expect(engine.submitMessage(rawPrompt).next()).rejects.toThrow(
+        `Path "${missingCwd}" does not exist`,
+      )
+      expect(processUserInputCalls).toBe(0)
+      await flushTraceForTesting()
+
+      const events = readTraceEvents('session-query-engine-cwd-error')
+      const boundaryEvents = events.filter(
+        event => event.type === 'turn.start' || event.type === 'turn.end',
+      )
+
+      expect(boundaryEvents.map(event => event.type)).toEqual([
+        'turn.start',
+        'turn.end',
+      ])
+      expect(boundaryEvents[0].turnId).toBe(boundaryEvents[1].turnId)
+      expect(boundaryEvents[0].payload).toMatchObject({
+        inputMode: 'prompt',
+        promptKind: 'text',
+        messageCountBefore: 0,
+      })
+      expect(boundaryEvents[1].payload).toMatchObject({
+        success: false,
+        error: true,
+        aborted: false,
+        errorName: 'Error',
+        finalMessageCount: 0,
+      })
+      expect(JSON.stringify(boundaryEvents)).not.toContain(rawPrompt)
+      expect(JSON.stringify(boundaryEvents)).not.toContain(missingCwd)
     })
   })
 } else {
