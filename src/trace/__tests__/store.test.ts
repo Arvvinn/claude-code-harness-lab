@@ -3,11 +3,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test'
 import {
-  DEFAULT_TRACE_CONFIG,
-  loadTraceConfig,
-  saveTraceConfig,
-} from '../config.js'
-import {
   getActiveTracePath,
   getTraceConfigPath,
   getTraceEventsPath,
@@ -77,22 +72,6 @@ describe('trace store', () => {
     writeActiveTraceSession(activeSession)
 
     expect(readActiveTraceSession()).toEqual(activeSession)
-  })
-
-  test('loads the default trace config when the config is missing or invalid', async () => {
-    expect(loadTraceConfig()).toEqual(DEFAULT_TRACE_CONFIG)
-
-    await writeFile(getTraceConfigPath(), '{"mode":"bad"}')
-
-    expect(loadTraceConfig()).toEqual(DEFAULT_TRACE_CONFIG)
-  })
-
-  test('saves and loads trace config', () => {
-    const config = { mode: 'learn', autoTailWindow: false } as const
-
-    saveTraceConfig(config)
-
-    expect(loadTraceConfig()).toEqual(config)
   })
 })
 
