@@ -120,11 +120,22 @@ export function emitTrace(input: EmitTraceInput): void {
 }
 
 export function endTraceSession(payload?: Record<string, unknown>): void {
-  if (disabled || activeTrace === null) {
+  if (activeTrace === null) {
     return
   }
 
-  if (getTraceMode() === 'off') {
+  if (disabled) {
+    activeTrace = null
+    return
+  }
+
+  const mode = getTraceMode()
+
+  if (mode === 'off') {
+    enqueueTraceWrite(() => {
+      clearActiveTraceSession()
+    })
+    activeTrace = null
     return
   }
 

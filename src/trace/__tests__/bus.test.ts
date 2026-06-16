@@ -7,6 +7,7 @@ import {
   emitTrace,
   endTraceSession,
   flushTraceForTesting,
+  getActiveTraceSessionForProcess,
   getTraceMode,
   resetTraceForTesting,
   startTraceSession,
@@ -189,6 +190,27 @@ describe('TraceBus', () => {
       'trace.session_start',
     ])
     expect(events.map(event => event.sequence)).toEqual([1, 2, 3])
+  })
+
+  test('endTraceSession clears active state when persisted mode is already off', async () => {
+    await writeTraceConfig({ mode: 'learn', autoTailWindow: true })
+
+    startTraceSession({
+      sessionId: 'session-end-after-off',
+      cwd: 'C:\\workspace',
+      argv: ['ccb'],
+    })
+    await flushTraceForTesting()
+    await writeTraceConfig({ mode: 'off', autoTailWindow: true })
+
+    endTraceSession({ reason: 'external-off' })
+    await flushTraceForTesting()
+
+    expect(readActiveTraceSession()).toBeNull()
+    expect(getActiveTraceSessionForProcess()).toBeNull()
+    expect(
+      readTraceEvents('session-end-after-off').map(event => event.type),
+    ).toEqual(['trace.session_start'])
   })
 
   test('write failures disable tracing for the current process', async () => {
