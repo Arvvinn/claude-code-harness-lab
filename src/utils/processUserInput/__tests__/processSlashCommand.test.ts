@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import type { Command, LocalCommandResult } from '../../../types/command'
 import type { QueuedCommand } from '../../../types/textInputTypes'
 import {
   resetStateForTests,
@@ -18,6 +19,7 @@ import {
   cleanupTempDir,
   createTempDir,
 } from '../../../../tests/mocks/file-system'
+import { normalizeMessagesForAPI } from '../../messages'
 
 let runAgentBlocker: Promise<void> | null = null
 let releaseRunAgentBlocker: (() => void) | null = null
@@ -223,7 +225,7 @@ describe('processSlashCommand', () => {
     getPromptForCommand: async () => [
       { type: 'text', text: 'review from fork' },
     ],
-  } as const
+  } satisfies Command
 
   const displayOnlyCommand = {
     type: 'local',
@@ -231,14 +233,15 @@ describe('processSlashCommand', () => {
     description: 'test display-only command',
     supportsNonInteractive: true,
     load: async () => ({
-      call: async () => ({
-        type: 'display',
-        value: 'visible to caller only',
-      }),
+      call: async () =>
+        ({
+          type: 'display',
+          value: 'visible to caller only',
+        }) satisfies LocalCommandResult,
     }),
-  } as any
+  } satisfies Command
 
-  function createContext(commands = [forkedCommand]) {
+  function createContext(commands: Command[] = [forkedCommand]) {
     return {
       getAppState: () => ({
         kairosEnabled: true,
@@ -261,7 +264,7 @@ describe('processSlashCommand', () => {
     } as any
   }
 
-  test('returns local display-only command output without transcript messages', async () => {
+  test('returns local display-only command output as a visible non-local-command system message', async () => {
     const result = await processSlashCommand(
       '/display-only status',
       [],
@@ -272,10 +275,38 @@ describe('processSlashCommand', () => {
     )
 
     expect(result).toMatchObject({
-      messages: [],
       shouldQuery: false,
       resultText: 'visible to caller only',
     })
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0]).toMatchObject({
+      type: 'system',
+      subtype: 'informational',
+      content: 'visible to caller only',
+      level: 'suggestion',
+    })
+    expect(result.messages[0]).not.toMatchObject({
+      subtype: 'local_command',
+    })
+    expect(JSON.stringify(result.messages)).not.toContain(
+      '<local-command-stdout>',
+    )
+    expect(JSON.stringify(result.messages)).not.toContain(
+      '<local-command-stderr>',
+    )
+  })
+
+  test('normalizes local display-only command output to no API-visible messages', async () => {
+    const result = await processSlashCommand(
+      '/display-only status',
+      [],
+      [],
+      [],
+      createContext([displayOnlyCommand]),
+      mock(() => {}),
+    )
+
+    expect(normalizeMessagesForAPI(result.messages)).toEqual([])
   })
 
   test('defers autonomy completion until a KAIROS background forked command completes', async () => {

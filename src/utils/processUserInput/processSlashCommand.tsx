@@ -60,7 +60,6 @@ import {
   createUserMessage,
   formatCommandInputTags,
   isCompactBoundaryMessage,
-  isSystemLocalCommandMessage,
   normalizeMessages,
   prepareUserContent,
 } from '../messages.js';
@@ -672,10 +671,11 @@ export async function processSlashCommand(
 
   // Check if this is a compact result which handle their own synthetic caveat message ordering
   const isCompactResult = newMessages.length > 0 && newMessages[0] && isCompactBoundaryMessage(newMessages[0]);
+  const isSystemOnlyResult = newMessages.every(message => message.type === 'system');
 
   return {
     messages:
-      messageShouldQuery || newMessages.every(isSystemLocalCommandMessage) || isCompactResult
+      messageShouldQuery || isSystemOnlyResult || isCompactResult
         ? newMessages
         : [createSyntheticUserCaveatMessage(), ...newMessages],
     shouldQuery: messageShouldQuery,
@@ -879,7 +879,7 @@ async function getMessagesForSlashCommand(
 
           if (result.type === 'display') {
             return {
-              messages: [],
+              messages: [createSystemMessage(result.value, 'suggestion')],
               shouldQuery: false,
               command,
               resultText: result.value,
