@@ -24,6 +24,7 @@ export function getTraceEventsPath(sessionId: string): string {
 function assertValidTraceSessionId(sessionId: string): void {
   if (
     sessionId.length === 0 ||
+    sessionId === '.' ||
     sessionId === '..' ||
     sessionId.includes('/') ||
     sessionId.includes('\\') ||

@@ -45,7 +45,14 @@ describe('trace store', () => {
   })
 
   test('rejects trace event paths for unsafe session ids', () => {
-    for (const sessionId of ['', '..', '../outside', '..\\outside', traceDir]) {
+    for (const sessionId of [
+      '',
+      '.',
+      '..',
+      '../outside',
+      '..\\outside',
+      traceDir,
+    ]) {
       expect(() => getTraceEventsPath(sessionId)).toThrow(
         'Invalid trace session id',
       )
@@ -89,6 +96,52 @@ describe('trace store', () => {
     writeActiveTraceSession(activeSession)
 
     expect(readActiveTraceSession()).toEqual(activeSession)
+  })
+
+  test('rejects invalid active trace session pointers when writing', () => {
+    expect(() =>
+      writeActiveTraceSession({
+        sessionId: '../outside',
+        eventsPath: join(traceDir, 'outside', 'events.jsonl'),
+        startedAt: '2026-06-16T00:00:00.000Z',
+      }),
+    ).toThrow('Invalid active trace session')
+
+    expect(() =>
+      writeActiveTraceSession({
+        sessionId: 'session-1',
+        eventsPath: join(traceDir, 'other-session', 'events.jsonl'),
+        startedAt: '2026-06-16T00:00:00.000Z',
+      }),
+    ).toThrow('Invalid active trace session')
+  })
+
+  test('returns null for corrupt active trace session pointers', async () => {
+    await writeFile(getActiveTracePath(), '{bad json')
+
+    expect(readActiveTraceSession()).toBeNull()
+
+    await writeFile(
+      getActiveTracePath(),
+      JSON.stringify({
+        sessionId: '../outside',
+        eventsPath: join(traceDir, 'outside', 'events.jsonl'),
+        startedAt: '2026-06-16T00:00:00.000Z',
+      }),
+    )
+
+    expect(readActiveTraceSession()).toBeNull()
+
+    await writeFile(
+      getActiveTracePath(),
+      JSON.stringify({
+        sessionId: 'session-1',
+        eventsPath: join(traceDir, 'other-session', 'events.jsonl'),
+        startedAt: '2026-06-16T00:00:00.000Z',
+      }),
+    )
+
+    expect(readActiveTraceSession()).toBeNull()
   })
 })
 

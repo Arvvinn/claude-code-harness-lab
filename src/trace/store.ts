@@ -28,6 +28,7 @@ export function appendTraceEvent(event: TraceEvent): void {
 }
 
 export function writeActiveTraceSession(session: ActiveTraceSession): void {
+  assertValidActiveTraceSession(session)
   mkdirSync(getTraceRootDir(), { recursive: true })
   writeJsonAtomically(getActiveTracePath(), session)
 }
@@ -39,13 +40,17 @@ export function readActiveTraceSession(): ActiveTraceSession | null {
     return null
   }
 
-  const parsed: unknown = JSON.parse(readFileSync(activeTracePath, 'utf8'))
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(activeTracePath, 'utf8'))
 
-  if (!isActiveTraceSession(parsed)) {
+    if (!isActiveTraceSession(parsed) || !isValidActiveTraceSession(parsed)) {
+      return null
+    }
+
+    return parsed
+  } catch {
     return null
   }
-
-  return parsed
 }
 
 export function readTraceEvents(sessionId: string): TraceEvent[] {
@@ -73,6 +78,20 @@ function isActiveTraceSession(value: unknown): value is ActiveTraceSession {
     typeof session.eventsPath === 'string' &&
     typeof session.startedAt === 'string'
   )
+}
+
+function assertValidActiveTraceSession(session: ActiveTraceSession): void {
+  if (!isValidActiveTraceSession(session)) {
+    throw new Error('Invalid active trace session')
+  }
+}
+
+function isValidActiveTraceSession(session: ActiveTraceSession): boolean {
+  try {
+    return session.eventsPath === getTraceEventsPath(session.sessionId)
+  } catch {
+    return false
+  }
 }
 
 function writeJsonAtomically(path: string, value: unknown): void {
