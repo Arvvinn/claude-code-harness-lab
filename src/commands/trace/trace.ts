@@ -8,7 +8,10 @@ import {
   startTraceSession,
 } from '../../trace/bus.js'
 import { loadTraceConfig, saveTraceConfig } from '../../trace/config.js'
-import { readActiveTraceSession } from '../../trace/store.js'
+import {
+  clearActiveTraceSession,
+  readActiveTraceSession,
+} from '../../trace/store.js'
 
 const TAIL_COMMAND = 'claude trace tail'
 
@@ -25,6 +28,7 @@ export const call: LocalCommandCall = async args => {
       }
     case 'off':
       endTraceSession({ reason: 'trace command disabled tracing' })
+      clearActiveTraceSession()
       saveTraceConfig({ ...loadTraceConfig(), mode: 'off' })
       return { type: 'text', value: formatTraceStatus() }
     case 'learn':

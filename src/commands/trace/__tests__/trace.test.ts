@@ -7,9 +7,11 @@ import {
   resetTraceForTesting,
 } from '../../../trace/bus.js'
 import { loadTraceConfig } from '../../../trace/config.js'
+import { getTraceEventsPath } from '../../../trace/paths.js'
 import {
   readActiveTraceSession,
   readTraceEvents,
+  writeActiveTraceSession,
 } from '../../../trace/store.js'
 
 const originalTraceDir = process.env.CLAUDE_CODE_TRACE_DIR
@@ -84,6 +86,29 @@ describe('/trace command', () => {
       'trace.session_end',
     ])
     expect(readActiveTraceSession()).toBeNull()
+  })
+
+  test('off clears a stale active pointer without in-process trace state', async () => {
+    const { call } = await import('../trace.js')
+
+    writeActiveTraceSession({
+      sessionId: 'stale-session',
+      eventsPath: getTraceEventsPath('stale-session'),
+      startedAt: '2026-06-16T00:00:00.000Z',
+    })
+
+    const result = await call('off', makeContext())
+    await flushTraceForTesting()
+
+    expect(readActiveTraceSession()).toBeNull()
+    expect(result).toEqual({
+      type: 'text',
+      value: expect.stringContaining('Session: none'),
+    })
+    expect(result).toEqual({
+      type: 'text',
+      value: expect.stringContaining('Events: none'),
+    })
   })
 
   test('learn after off uses monotonic sequence in the same process', async () => {
