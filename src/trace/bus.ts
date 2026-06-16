@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { loadTraceConfig } from './config.js'
 import { getTraceEventsPath } from './paths.js'
 import { redactTracePayload } from './redaction.js'
-import { appendTraceEvent, writeActiveTraceSession } from './store.js'
+import {
+  appendTraceEvent,
+  clearActiveTraceSession,
+  writeActiveTraceSession,
+} from './store.js'
 import type {
   ActiveTraceMode,
   TraceEvent,
@@ -72,7 +76,6 @@ export function startTraceSession(input: {
     sessionId: input.sessionId,
     mode,
   }
-  sequence = 0
   const sessionStartEvent = buildTraceEvent({
     source: 'repl',
     type: 'trace.session_start',
@@ -98,6 +101,10 @@ export function emitTrace(input: EmitTraceInput): void {
   }
 
   if (getTraceMode() === 'off') {
+    enqueueTraceWrite(() => {
+      clearActiveTraceSession()
+    })
+    activeTrace = null
     return
   }
 
@@ -129,6 +136,7 @@ export function endTraceSession(payload?: Record<string, unknown>): void {
 
   enqueueTraceWrite(() => {
     appendTraceEvent(event)
+    clearActiveTraceSession()
   })
   activeTrace = null
 }

@@ -162,6 +162,33 @@ describe('TraceBus', () => {
       'trace.session_end',
     ])
     expect(events[1].payload).toEqual({ reason: 'complete' })
+    expect(readActiveTraceSession()).toBeNull()
+  })
+
+  test('sequence remains monotonic across same-process trace restarts', async () => {
+    await writeTraceConfig({ mode: 'learn', autoTailWindow: true })
+
+    startTraceSession({
+      sessionId: 'session-restart',
+      cwd: 'C:\\workspace',
+      argv: ['ccb'],
+    })
+    endTraceSession({ reason: 'off' })
+    startTraceSession({
+      sessionId: 'session-restart',
+      cwd: 'C:\\workspace',
+      argv: ['ccb'],
+    })
+
+    await flushTraceForTesting()
+
+    const events = readTraceEvents('session-restart')
+    expect(events.map(event => event.type)).toEqual([
+      'trace.session_start',
+      'trace.session_end',
+      'trace.session_start',
+    ])
+    expect(events.map(event => event.sequence)).toEqual([1, 2, 3])
   })
 
   test('write failures disable tracing for the current process', async () => {

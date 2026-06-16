@@ -74,9 +74,18 @@ function startCurrentTraceSessionIfNeeded(): void {
 
 function formatTraceStatus(): string {
   const mode = getTraceMode()
+  const lines = [`Mode: ${mode}`]
+
+  if (mode === 'off') {
+    lines.push('Session: none')
+    lines.push('Events: none')
+    lines.push(`Tail: ${TAIL_COMMAND}`)
+
+    return lines.join('\n')
+  }
+
   const activeSession =
     getActiveTraceSessionForProcess() ?? readActiveTraceSession()
-  const lines = [`Mode: ${mode}`]
 
   if (activeSession) {
     lines.push(`Session: ${activeSession.sessionId}`)

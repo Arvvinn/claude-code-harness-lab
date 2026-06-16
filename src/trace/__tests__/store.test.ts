@@ -10,6 +10,7 @@ import {
 } from '../paths.js'
 import {
   appendTraceEvent,
+  clearActiveTraceSession,
   readActiveTraceSession,
   readTraceEvents,
   writeActiveTraceSession,
@@ -96,6 +97,23 @@ describe('trace store', () => {
     writeActiveTraceSession(activeSession)
 
     expect(readActiveTraceSession()).toEqual(activeSession)
+  })
+
+  test('clears the active trace session pointer if present', () => {
+    writeActiveTraceSession({
+      sessionId: 'session-1',
+      eventsPath: getTraceEventsPath('session-1'),
+      startedAt: '2026-06-16T00:00:00.000Z',
+    })
+
+    clearActiveTraceSession()
+
+    expect(readActiveTraceSession()).toBeNull()
+  })
+
+  test('clearing a missing active trace session pointer is a no-op', () => {
+    expect(() => clearActiveTraceSession()).not.toThrow()
+    expect(readActiveTraceSession()).toBeNull()
   })
 
   test('rejects invalid active trace session pointers when writing', () => {

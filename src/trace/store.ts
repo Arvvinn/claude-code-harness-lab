@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs'
 import { dirname } from 'node:path'
@@ -31,6 +32,10 @@ export function writeActiveTraceSession(session: ActiveTraceSession): void {
   assertValidActiveTraceSession(session)
   mkdirSync(getTraceRootDir(), { recursive: true })
   writeJsonAtomically(getActiveTracePath(), session)
+}
+
+export function clearActiveTraceSession(): void {
+  rmSync(getActiveTracePath(), { force: true })
 }
 
 export function readActiveTraceSession(): ActiveTraceSession | null {

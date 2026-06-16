@@ -1,18 +1,16 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   flushTraceForTesting,
   resetTraceForTesting,
 } from '../../../trace/bus.js'
 import { loadTraceConfig } from '../../../trace/config.js'
-import { getTraceEventsPath } from '../../../trace/paths.js'
-import { readTraceEvents } from '../../../trace/store.js'
-
-mock.module('../../../bootstrap/state.js', () => ({
-  getSessionId: () => 'trace-command-session',
-}))
+import {
+  readActiveTraceSession,
+  readTraceEvents,
+} from '../../../trace/store.js'
 
 const originalTraceDir = process.env.CLAUDE_CODE_TRACE_DIR
 let traceDir: string
@@ -56,17 +54,19 @@ describe('/trace command', () => {
       type: 'text',
       value: expect.stringContaining('Mode: learn'),
     })
-    expect(readTraceEvents('trace-command-session')).toHaveLength(1)
-    expect(readTraceEvents('trace-command-session')[0].type).toBe(
-      'trace.session_start',
-    )
+    const sessionId = readActiveTraceSession()?.sessionId
+    expect(sessionId).toBeDefined()
+    expect(readTraceEvents(sessionId!)).toHaveLength(1)
+    expect(readTraceEvents(sessionId!)[0].type).toBe('trace.session_start')
   })
 
-  test('off persists off and ends live tracing for the process', async () => {
+  test('off persists off, ends live tracing, and hides stale active status', async () => {
     const { call } = await import('../trace.js')
 
     await call('learn', makeContext())
     await flushTraceForTesting()
+    const sessionId = readActiveTraceSession()?.sessionId
+    expect(sessionId).toBeDefined()
     const result = await call('off', makeContext())
     await flushTraceForTesting()
 
@@ -75,9 +75,37 @@ describe('/trace command', () => {
       type: 'text',
       value: expect.stringContaining('Mode: off'),
     })
-    expect(
-      readTraceEvents('trace-command-session').map(event => event.type),
-    ).toEqual(['trace.session_start', 'trace.session_end'])
+    expect(result).toEqual({
+      type: 'text',
+      value: expect.stringContaining('Session: none'),
+    })
+    expect(readTraceEvents(sessionId!).map(event => event.type)).toEqual([
+      'trace.session_start',
+      'trace.session_end',
+    ])
+    expect(readActiveTraceSession()).toBeNull()
+  })
+
+  test('learn after off uses monotonic sequence in the same process', async () => {
+    const { call } = await import('../trace.js')
+
+    await call('learn', makeContext())
+    await flushTraceForTesting()
+    const sessionId = readActiveTraceSession()?.sessionId
+    expect(sessionId).toBeDefined()
+
+    await call('off', makeContext())
+    await flushTraceForTesting()
+    await call('learn', makeContext())
+    await flushTraceForTesting()
+
+    const events = readTraceEvents(sessionId!)
+    expect(events.map(event => event.type)).toEqual([
+      'trace.session_start',
+      'trace.session_end',
+      'trace.session_start',
+    ])
+    expect(events.map(event => event.sequence)).toEqual([1, 2, 3])
   })
 
   test('tail prints the external command without starting tracing', async () => {
@@ -90,9 +118,7 @@ describe('/trace command', () => {
       type: 'text',
       value: expect.stringContaining('claude trace tail'),
     })
-    expect(() => readTraceEvents('trace-command-session')).not.toThrow()
-    expect(readTraceEvents('trace-command-session')).toEqual([])
-    expect(getTraceEventsPath('trace-command-session')).toContain(traceDir)
+    expect(readActiveTraceSession()).toBeNull()
   })
 })
 
