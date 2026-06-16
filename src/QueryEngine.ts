@@ -279,24 +279,12 @@ export class QueryEngine {
         traceTurnId = randomUUID()
       }
     }
-    let traceTurnStarted = false
-    let traceTurnSuccess = false
-    let traceTurnError = false
-    let traceTurnResultSubtype: string | null = null
-    let traceTurnStopReason: string | null = null
+    let traceTurnStarted: boolean | undefined
+    let traceTurnSuccess: boolean | undefined
+    let traceTurnError: boolean | undefined
+    let traceTurnResultSubtype: string | null | undefined
+    let traceTurnStopReason: string | null | undefined
     let traceTurnErrorName: string | undefined
-
-    const setTraceTurnOutcome = (outcome: {
-      success: boolean
-      error: boolean
-      resultSubtype: string
-      stopReason?: string | null
-    }): void => {
-      traceTurnSuccess = outcome.success
-      traceTurnError = outcome.error
-      traceTurnResultSubtype = outcome.resultSubtype
-      traceTurnStopReason = outcome.stopReason ?? null
-    }
 
     try {
       // Wrap canUseTool to track permission denials
@@ -467,6 +455,24 @@ export class QueryEngine {
         }
       }
 
+      if (feature('HARNESS_TRACE')) {
+        traceTurnStarted = true
+        if (traceTurnId === undefined && isTraceSessionActive()) {
+          traceTurnId = randomUUID()
+        }
+        emitTrace({
+          source: 'query',
+          type: 'turn.start',
+          turnId: traceTurnId,
+          payload: {
+            inputSource: getTraceInputSource(),
+            inputMode: 'prompt',
+            promptKind: typeof prompt === 'string' ? 'text' : 'blocks',
+            messageCountBefore: this.mutableMessages.length,
+          },
+        })
+      }
+
       const {
         messages: messagesFromUserInput,
         shouldQuery,
@@ -487,25 +493,6 @@ export class QueryEngine {
         querySource: 'sdk',
       })
 
-      traceTurnStarted = true
-      if (feature('HARNESS_TRACE')) {
-        if (traceTurnId === undefined && isTraceSessionActive()) {
-          traceTurnId = randomUUID()
-        }
-        emitTrace({
-          source: 'query',
-          type: 'turn.start',
-          turnId: traceTurnId,
-          payload: {
-            inputSource: getTraceInputSource(),
-            inputMode: 'prompt',
-            promptKind: typeof prompt === 'string' ? 'text' : 'blocks',
-            messageCountBefore: this.mutableMessages.length,
-            acceptedMessageCount: messagesFromUserInput.length,
-            shouldQuery,
-          },
-        })
-      }
       if (feature('HARNESS_TRACE')) {
         emitTrace({
           source: 'query',
@@ -717,12 +704,12 @@ export class QueryEngine {
           }
         }
 
-        setTraceTurnOutcome({
-          success: true,
-          error: false,
-          resultSubtype: 'success',
-          stopReason: null,
-        })
+        if (feature('HARNESS_TRACE')) {
+          traceTurnSuccess = true
+          traceTurnError = false
+          traceTurnResultSubtype = 'success'
+          traceTurnStopReason = null
+        }
         yield {
           type: 'result',
           subtype: 'success',
@@ -991,12 +978,12 @@ export class QueryEngine {
                   await flushSessionStorage()
                 }
               }
-              setTraceTurnOutcome({
-                success: false,
-                error: true,
-                resultSubtype: 'error_max_turns',
-                stopReason: lastStopReason,
-              })
+              if (feature('HARNESS_TRACE')) {
+                traceTurnSuccess = false
+                traceTurnError = true
+                traceTurnResultSubtype = 'error_max_turns'
+                traceTurnStopReason = lastStopReason
+              }
               yield {
                 type: 'result',
                 subtype: 'error_max_turns',
@@ -1140,12 +1127,12 @@ export class QueryEngine {
               await flushSessionStorage()
             }
           }
-          setTraceTurnOutcome({
-            success: false,
-            error: true,
-            resultSubtype: 'error_max_budget_usd',
-            stopReason: lastStopReason,
-          })
+          if (feature('HARNESS_TRACE')) {
+            traceTurnSuccess = false
+            traceTurnError = true
+            traceTurnResultSubtype = 'error_max_budget_usd'
+            traceTurnStopReason = lastStopReason
+          }
           yield {
             type: 'result',
             subtype: 'error_max_budget_usd',
@@ -1191,12 +1178,12 @@ export class QueryEngine {
                 await flushSessionStorage()
               }
             }
-            setTraceTurnOutcome({
-              success: false,
-              error: true,
-              resultSubtype: 'error_max_structured_output_retries',
-              stopReason: lastStopReason,
-            })
+            if (feature('HARNESS_TRACE')) {
+              traceTurnSuccess = false
+              traceTurnError = true
+              traceTurnResultSubtype = 'error_max_structured_output_retries'
+              traceTurnStopReason = lastStopReason
+            }
             yield {
               type: 'result',
               subtype: 'error_max_structured_output_retries',
@@ -1259,12 +1246,12 @@ export class QueryEngine {
       }
 
       if (!isResultSuccessful(result, lastStopReason)) {
-        setTraceTurnOutcome({
-          success: false,
-          error: true,
-          resultSubtype: 'error_during_execution',
-          stopReason: lastStopReason,
-        })
+        if (feature('HARNESS_TRACE')) {
+          traceTurnSuccess = false
+          traceTurnError = true
+          traceTurnResultSubtype = 'error_during_execution'
+          traceTurnStopReason = lastStopReason
+        }
         yield {
           type: 'result',
           subtype: 'error_during_execution',
@@ -1320,12 +1307,12 @@ export class QueryEngine {
         isApiError = Boolean(result.isApiErrorMessage)
       }
 
-      setTraceTurnOutcome({
-        success: !isApiError,
-        error: isApiError,
-        resultSubtype: 'success',
-        stopReason: lastStopReason,
-      })
+      if (feature('HARNESS_TRACE')) {
+        traceTurnSuccess = !isApiError
+        traceTurnError = isApiError
+        traceTurnResultSubtype = 'success'
+        traceTurnStopReason = lastStopReason
+      }
       yield {
         type: 'result',
         subtype: 'success',
@@ -1348,24 +1335,26 @@ export class QueryEngine {
         uuid: randomUUID(),
       }
     } catch (error) {
-      traceTurnSuccess = false
-      traceTurnError = true
-      traceTurnErrorName = error instanceof Error ? error.name : typeof error
+      if (feature('HARNESS_TRACE')) {
+        traceTurnSuccess = false
+        traceTurnError = true
+        traceTurnErrorName = error instanceof Error ? error.name : typeof error
+      }
       throw error
     } finally {
-      if (traceTurnStarted) {
-        if (feature('HARNESS_TRACE')) {
+      if (feature('HARNESS_TRACE')) {
+        if (traceTurnStarted) {
           emitTrace({
             source: 'query',
             type: 'turn.end',
             turnId: traceTurnId,
             payload: {
               durationMs: Date.now() - startTime,
-              success: traceTurnSuccess,
-              error: traceTurnError,
+              success: traceTurnSuccess === true,
+              error: traceTurnError === true,
               aborted: this.abortController.signal.aborted,
-              resultSubtype: traceTurnResultSubtype,
-              stopReason: traceTurnStopReason,
+              resultSubtype: traceTurnResultSubtype ?? null,
+              stopReason: traceTurnStopReason ?? null,
               finalMessageCount: this.mutableMessages.length,
               ...(traceTurnErrorName ? { errorName: traceTurnErrorName } : {}),
             },

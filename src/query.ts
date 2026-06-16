@@ -288,12 +288,6 @@ export async function* query(
 > {
   const consumedCommandUuids: string[] = []
   const consumedAutonomyCommands: QueuedCommand[] = []
-  let traceTurnId = params.traceTurnId
-  if (feature('HARNESS_TRACE')) {
-    if (isTraceSessionActive()) {
-      traceTurnId ??= randomUUID()
-    }
-  }
 
   // Create Langfuse trace for this query turn (no-op if not configured).
   // When called as a sub-agent, langfuseTrace is already set by runAgent()
@@ -321,13 +315,19 @@ export async function* query(
         toolUseContext: { ...params.toolUseContext, langfuseTrace },
       }
     : params
-  const paramsWithHarnessTrace: QueryParams =
-    traceTurnId === undefined
-      ? paramsWithTrace
-      : {
-          ...paramsWithTrace,
-          traceTurnId,
-        }
+  let paramsWithHarnessTrace = paramsWithTrace
+  if (feature('HARNESS_TRACE')) {
+    let traceTurnId = params.traceTurnId
+    if (isTraceSessionActive()) {
+      traceTurnId ??= randomUUID()
+    }
+    if (traceTurnId !== undefined) {
+      paramsWithHarnessTrace = {
+        ...paramsWithTrace,
+        traceTurnId,
+      }
+    }
+  }
 
   let terminal: Terminal | undefined
   let didThrow = false
@@ -458,7 +458,7 @@ async function* queryLoop(
   // trigger point. Loop-local (not on State) to avoid touching the 7 continue
   // sites.
   let taskBudgetRemaining: number | undefined
-  let traceLoopIndex = 0
+  let traceLoopIndex: number | undefined
 
   // Snapshot immutable env/statsig/session state once at entry. See QueryConfig
   // for what's included and why feature() gates are intentionally excluded.
@@ -489,16 +489,19 @@ async function* queryLoop(
       stopHookActive,
       turnCount,
     } = state
-    traceLoopIndex += 1
-    const traceLoopStartedAt = Date.now()
-    let traceLoopStopReason = 'unknown'
-    let traceLoopError = false
+    let traceLoopStartedAt: number | undefined
+    let traceLoopStopReason: string | undefined
+    let traceLoopError: boolean | undefined
     const assistantMessages: AssistantMessage[] = []
     const toolResults: (UserMessage | AttachmentMessage)[] = []
     const toolUseBlocks: ToolUseBlock[] = []
     let needsFollowUp = false
 
     if (feature('HARNESS_TRACE')) {
+      traceLoopIndex = (traceLoopIndex ?? 0) + 1
+      traceLoopStartedAt = Date.now()
+      traceLoopStopReason = 'unknown'
+      traceLoopError = false
       emitTrace({
         source: 'query',
         type: 'query.loop_start',
@@ -866,7 +869,9 @@ async function* queryLoop(
             content: PROMPT_TOO_LONG_ERROR_MESSAGE,
             error: 'invalid_request',
           })
-          traceLoopStopReason = 'blocking_limit'
+          if (feature('HARNESS_TRACE')) {
+            traceLoopStopReason = 'blocking_limit'
+          }
           return { reason: 'blocking_limit' }
         }
       }
@@ -1238,7 +1243,9 @@ async function* queryLoop(
                 'warning',
               )
 
-              traceLoopStopReason = 'model_fallback_retry'
+              if (feature('HARNESS_TRACE')) {
+                traceLoopStopReason = 'model_fallback_retry'
+              }
               continue
             }
             throw innerError
@@ -1269,7 +1276,9 @@ async function* queryLoop(
           yield createAssistantAPIErrorMessage({
             content: error.message,
           })
-          traceLoopStopReason = 'image_error'
+          if (feature('HARNESS_TRACE')) {
+            traceLoopStopReason = 'image_error'
+          }
           return { reason: 'image_error' }
         }
 
@@ -1289,7 +1298,9 @@ async function* queryLoop(
 
         // To help track down bugs, log loudly for ants
         logAntError('Query error', error)
-        traceLoopStopReason = 'model_error'
+        if (feature('HARNESS_TRACE')) {
+          traceLoopStopReason = 'model_error'
+        }
         return { reason: 'model_error', error }
       }
 
@@ -1371,7 +1382,9 @@ async function* queryLoop(
             toolUse: false,
           })
         }
-        traceLoopStopReason = 'aborted_streaming'
+        if (feature('HARNESS_TRACE')) {
+          traceLoopStopReason = 'aborted_streaming'
+        }
         return { reason: 'aborted_streaming' }
       }
 
@@ -1436,7 +1449,9 @@ async function* queryLoop(
                 },
               }
               state = next
-              traceLoopStopReason = 'collapse_drain_retry'
+              if (feature('HARNESS_TRACE')) {
+                traceLoopStopReason = 'collapse_drain_retry'
+              }
               continue
             }
           }
@@ -1487,7 +1502,9 @@ async function* queryLoop(
               transition: { reason: 'reactive_compact_retry' },
             }
             state = next
-            traceLoopStopReason = 'reactive_compact_retry'
+            if (feature('HARNESS_TRACE')) {
+              traceLoopStopReason = 'reactive_compact_retry'
+            }
             continue
           }
 
@@ -1498,9 +1515,11 @@ async function* queryLoop(
           // → retry → error → … (the hook injects more tokens each cycle).
           yield lastMessage!
           void executeStopFailureHooks(lastMessage!, toolUseContext)
-          traceLoopStopReason = isWithheldMedia
-            ? 'image_error'
-            : 'prompt_too_long'
+          if (feature('HARNESS_TRACE')) {
+            traceLoopStopReason = isWithheldMedia
+              ? 'image_error'
+              : 'prompt_too_long'
+          }
           return { reason: isWithheldMedia ? 'image_error' : 'prompt_too_long' }
         } else if (feature('CONTEXT_COLLAPSE') && isWithheld413) {
           // reactiveCompact compiled out but contextCollapse withheld and
@@ -1508,7 +1527,9 @@ async function* queryLoop(
           // early-return rationale — don't fall through to stop hooks.
           yield lastMessage
           void executeStopFailureHooks(lastMessage, toolUseContext)
-          traceLoopStopReason = 'prompt_too_long'
+          if (feature('HARNESS_TRACE')) {
+            traceLoopStopReason = 'prompt_too_long'
+          }
           return { reason: 'prompt_too_long' }
         }
 
@@ -1547,7 +1568,9 @@ async function* queryLoop(
               transition: { reason: 'max_output_tokens_escalate' },
             }
             state = next
-            traceLoopStopReason = 'max_output_tokens_escalate'
+            if (feature('HARNESS_TRACE')) {
+              traceLoopStopReason = 'max_output_tokens_escalate'
+            }
             continue
           }
 
@@ -1579,7 +1602,9 @@ async function* queryLoop(
               },
             }
             state = next
-            traceLoopStopReason = 'max_output_tokens_recovery'
+            if (feature('HARNESS_TRACE')) {
+              traceLoopStopReason = 'max_output_tokens_recovery'
+            }
             continue
           }
 
@@ -1593,7 +1618,9 @@ async function* queryLoop(
         // error → hook blocking → retry → error → …
         if (lastMessage?.isApiErrorMessage) {
           void executeStopFailureHooks(lastMessage, toolUseContext)
-          traceLoopStopReason = 'model_error'
+          if (feature('HARNESS_TRACE')) {
+            traceLoopStopReason = 'model_error'
+          }
           return {
             reason: 'model_error',
             error: lastMessage.error ?? lastMessage.apiError ?? 'api_error',
@@ -1612,7 +1639,9 @@ async function* queryLoop(
         )
 
         if (stopHookResult.preventContinuation) {
-          traceLoopStopReason = 'stop_hook_prevented'
+          if (feature('HARNESS_TRACE')) {
+            traceLoopStopReason = 'stop_hook_prevented'
+          }
           return { reason: 'stop_hook_prevented' }
         }
 
@@ -1639,7 +1668,9 @@ async function* queryLoop(
             transition: { reason: 'stop_hook_blocking' },
           }
           state = next
-          traceLoopStopReason = 'stop_hook_blocking'
+          if (feature('HARNESS_TRACE')) {
+            traceLoopStopReason = 'stop_hook_blocking'
+          }
           continue
         }
 
@@ -1675,7 +1706,9 @@ async function* queryLoop(
               turnCount,
               transition: { reason: 'token_budget_continuation' },
             }
-            traceLoopStopReason = 'token_budget_continuation'
+            if (feature('HARNESS_TRACE')) {
+              traceLoopStopReason = 'token_budget_continuation'
+            }
             continue
           }
 
@@ -1693,7 +1726,9 @@ async function* queryLoop(
           }
         }
 
-        traceLoopStopReason = 'completed'
+        if (feature('HARNESS_TRACE')) {
+          traceLoopStopReason = 'completed'
+        }
         return { reason: 'completed' }
       }
 
@@ -1857,13 +1892,17 @@ async function* queryLoop(
             turnCount: nextTurnCountOnAbort,
           })
         }
-        traceLoopStopReason = 'aborted_tools'
+        if (feature('HARNESS_TRACE')) {
+          traceLoopStopReason = 'aborted_tools'
+        }
         return { reason: 'aborted_tools' }
       }
 
       // If a hook indicated to prevent continuation, stop here
       if (shouldPreventContinuation) {
-        traceLoopStopReason = 'hook_stopped'
+        if (feature('HARNESS_TRACE')) {
+          traceLoopStopReason = 'hook_stopped'
+        }
         return { reason: 'hook_stopped' }
       }
 
@@ -2094,7 +2133,9 @@ async function* queryLoop(
           maxTurns,
           turnCount: nextTurnCount,
         })
-        traceLoopStopReason = 'max_turns'
+        if (feature('HARNESS_TRACE')) {
+          traceLoopStopReason = 'max_turns'
+        }
         return { reason: 'max_turns', turnCount: nextTurnCount }
       }
 
@@ -2112,10 +2153,14 @@ async function* queryLoop(
         transition: { reason: 'next_turn' },
       }
       state = next
-      traceLoopStopReason = 'next_turn'
+      if (feature('HARNESS_TRACE')) {
+        traceLoopStopReason = 'next_turn'
+      }
     } catch (error) {
-      traceLoopStopReason = 'thrown'
-      traceLoopError = true
+      if (feature('HARNESS_TRACE')) {
+        traceLoopStopReason = 'thrown'
+        traceLoopError = true
+      }
       throw error
     } finally {
       if (feature('HARNESS_TRACE')) {
@@ -2130,8 +2175,11 @@ async function* queryLoop(
             toolUseCount: toolUseBlocks.length,
             toolResultCount: toolResults.length,
             messageCount: messages.length,
-            durationMs: Date.now() - traceLoopStartedAt,
-            error: traceLoopError,
+            durationMs:
+              traceLoopStartedAt === undefined
+                ? 0
+                : Date.now() - traceLoopStartedAt,
+            error: traceLoopError === true,
             aborted: toolUseContext.abortController.signal.aborted,
           },
         })
