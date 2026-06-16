@@ -10,11 +10,14 @@ import {
 } from '../../trace/bus.js'
 import { loadTraceConfig, saveTraceConfig } from '../../trace/config.js'
 import {
+  launchTraceTailWindow,
+  TRACE_TAIL_COMMAND,
+  type TraceTailWindowLaunchResult,
+} from '../../trace/liveWindow.js'
+import {
   clearActiveTraceSession,
   readActiveTraceSession,
 } from '../../trace/store.js'
-
-const TAIL_COMMAND = 'claude trace tail'
 
 export const call: LocalCommandCall = async args => {
   const action = parseTraceAction(args)
@@ -25,7 +28,7 @@ export const call: LocalCommandCall = async args => {
     case 'tail':
       return {
         type: 'display',
-        value: `Trace tail command:\n${TAIL_COMMAND}`,
+        value: `Trace tail command:\n${TRACE_TAIL_COMMAND}`,
       }
     case 'off':
       endTraceSession({ reason: 'trace command disabled tracing' })
@@ -37,9 +40,10 @@ export const call: LocalCommandCall = async args => {
       saveTraceConfig({ ...loadTraceConfig(), mode: action })
       updateActiveTraceModeFromConfig()
       startCurrentTraceSessionIfNeeded()
+      const tailWindow = await launchTraceTailWindow()
       return {
         type: 'display',
-        value: `${formatTraceStatus()}\n\nTail window auto-launch is not available yet. Run:\n${TAIL_COMMAND}`,
+        value: `${formatTraceStatus()}\n\n${formatTailWindowResult(tailWindow)}`,
       }
   }
 }
@@ -85,7 +89,7 @@ function formatTraceStatus(): string {
   if (mode === 'off') {
     lines.push('Session: none')
     lines.push('Events: none')
-    lines.push(`Tail: ${TAIL_COMMAND}`)
+    lines.push(`Tail: ${TRACE_TAIL_COMMAND}`)
 
     return lines.join('\n')
   }
@@ -101,7 +105,24 @@ function formatTraceStatus(): string {
     lines.push('Events: none')
   }
 
-  lines.push(`Tail: ${TAIL_COMMAND}`)
+  lines.push(`Tail: ${TRACE_TAIL_COMMAND}`)
 
   return lines.join('\n')
+}
+
+function formatTailWindowResult(result: TraceTailWindowLaunchResult): string {
+  if (result.ok && result.reason === 'already_launched') {
+    return `Tail window: already launched\nTail: ${result.command}`
+  }
+
+  if (result.ok) {
+    const launcher = result.launcher ? ` via ${result.launcher}` : ''
+
+    return `Tail window: launched${launcher}\nTail: ${result.command}`
+  }
+
+  const reason = result.reason ?? 'unavailable'
+  const error = result.error ? ` (${result.error})` : ''
+
+  return `Tail window: auto-launch unavailable: ${reason}${error}\nRun:\n${result.command}`
 }

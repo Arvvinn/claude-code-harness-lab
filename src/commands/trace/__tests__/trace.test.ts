@@ -9,6 +9,10 @@ import {
   resetTraceForTesting,
 } from '../../../trace/bus.js'
 import { loadTraceConfig } from '../../../trace/config.js'
+import {
+  resetTraceTailWindowForTesting,
+  setTraceTailWindowSpawnForTesting,
+} from '../../../trace/liveWindow.js'
 import { getTraceEventsPath } from '../../../trace/paths.js'
 import {
   readActiveTraceSession,
@@ -24,11 +28,14 @@ describe('/trace command', () => {
     traceDir = await mkdtemp(join(tmpdir(), 'claude-trace-command-'))
     process.env.CLAUDE_CODE_TRACE_DIR = traceDir
     resetTraceForTesting()
+    resetTraceTailWindowForTesting()
+    setTraceTailWindowSpawnForTesting(async () => ({ ok: true }))
   })
 
   afterEach(async () => {
     await flushTraceForTesting()
     resetTraceForTesting()
+    resetTraceTailWindowForTesting()
 
     if (originalTraceDir === undefined) {
       delete process.env.CLAUDE_CODE_TRACE_DIR
@@ -182,6 +189,28 @@ describe('/trace command', () => {
       value: expect.stringContaining('claude trace tail'),
     })
     expect(readActiveTraceSession()).toBeNull()
+  })
+
+  test('learn prints the manual fallback when auto tail launch fails', async () => {
+    const { call } = await import('../trace.js')
+    setTraceTailWindowSpawnForTesting(async () => ({
+      ok: false,
+      error: new Error('no terminal available'),
+    }))
+
+    const result = await call('learn', makeContext())
+    await flushTraceForTesting()
+
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining(
+        'Tail window: auto-launch unavailable: launch_failed',
+      ),
+    })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('claude trace tail'),
+    })
   })
 })
 

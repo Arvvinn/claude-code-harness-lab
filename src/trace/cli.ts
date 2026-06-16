@@ -12,6 +12,7 @@ import {
   type TraceDisplayMode,
   type TraceDisplayRecord,
 } from './format.js'
+import { TRACE_TAIL_COMMAND } from './liveWindow.js'
 import { clearActiveTraceSession, readActiveTraceSession } from './store.js'
 import type { TraceMode } from './types.js'
 
@@ -153,7 +154,7 @@ function getStatusText(): string {
     )
   }
 
-  lines.push('Tail command: claude trace tail')
+  lines.push(`Tail command: ${TRACE_TAIL_COMMAND}`)
 
   return `${lines.join('\n')}\n`
 }
@@ -180,7 +181,7 @@ function setTraceModeText(mode: TraceMode): string {
     lines.push(`Events: ${activeSession.eventsPath}`)
   }
 
-  lines.push('Tail command: claude trace tail')
+  lines.push(`Tail command: ${TRACE_TAIL_COMMAND}`)
 
   return `${lines.join('\n')}\n`
 }
