@@ -49,11 +49,11 @@ describe('/trace command', () => {
       autoTailWindow: true,
     })
     expect(first).toEqual({
-      type: 'text',
+      type: 'display',
       value: expect.stringContaining('Mode: learn'),
     })
     expect(second).toEqual({
-      type: 'text',
+      type: 'display',
       value: expect.stringContaining('Mode: learn'),
     })
     const sessionId = readActiveTraceSession()?.sessionId
@@ -74,11 +74,11 @@ describe('/trace command', () => {
 
     expect(loadTraceConfig().mode).toBe('off')
     expect(result).toEqual({
-      type: 'text',
+      type: 'display',
       value: expect.stringContaining('Mode: off'),
     })
     expect(result).toEqual({
-      type: 'text',
+      type: 'display',
       value: expect.stringContaining('Session: none'),
     })
     expect(readTraceEvents(sessionId!).map(event => event.type)).toEqual([
@@ -102,11 +102,11 @@ describe('/trace command', () => {
 
     expect(readActiveTraceSession()).toBeNull()
     expect(result).toEqual({
-      type: 'text',
+      type: 'display',
       value: expect.stringContaining('Session: none'),
     })
     expect(result).toEqual({
-      type: 'text',
+      type: 'display',
       value: expect.stringContaining('Events: none'),
     })
   })
@@ -140,7 +140,7 @@ describe('/trace command', () => {
     await flushTraceForTesting()
 
     expect(result).toEqual({
-      type: 'text',
+      type: 'display',
       value: expect.stringContaining('claude trace tail'),
     })
     expect(readActiveTraceSession()).toBeNull()

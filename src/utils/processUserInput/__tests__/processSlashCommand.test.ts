@@ -225,7 +225,20 @@ describe('processSlashCommand', () => {
     ],
   } as const
 
-  function createContext() {
+  const displayOnlyCommand = {
+    type: 'local',
+    name: 'display-only',
+    description: 'test display-only command',
+    supportsNonInteractive: true,
+    load: async () => ({
+      call: async () => ({
+        type: 'display',
+        value: 'visible to caller only',
+      }),
+    }),
+  } as any
+
+  function createContext(commands = [forkedCommand]) {
     return {
       getAppState: () => ({
         kairosEnabled: true,
@@ -236,7 +249,7 @@ describe('processSlashCommand', () => {
         },
       }),
       options: {
-        commands: [forkedCommand],
+        commands,
         allowBackgroundForkedSlashCommands: true,
         tools: [],
         refreshTools: () => [],
@@ -247,6 +260,23 @@ describe('processSlashCommand', () => {
       setResponseLength: mock((_updater: (length: number) => number) => {}),
     } as any
   }
+
+  test('returns local display-only command output without transcript messages', async () => {
+    const result = await processSlashCommand(
+      '/display-only status',
+      [],
+      [],
+      [],
+      createContext([displayOnlyCommand]),
+      mock(() => {}),
+    )
+
+    expect(result).toMatchObject({
+      messages: [],
+      shouldQuery: false,
+      resultText: 'visible to caller only',
+    })
+  })
 
   test('defers autonomy completion until a KAIROS background forked command completes', async () => {
     const queued = await createAutonomyQueuedPrompt({

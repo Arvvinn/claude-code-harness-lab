@@ -594,6 +594,7 @@ export async function processSlashCommand(
       shouldQuery: false,
 
       model,
+      resultText,
       nextInput,
       submitNextInput,
       deferAutonomyCompletion,
@@ -873,6 +874,15 @@ async function getMessagesForSlashCommand(
               messages: [],
               shouldQuery: false,
               command,
+            };
+          }
+
+          if (result.type === 'display') {
+            return {
+              messages: [],
+              shouldQuery: false,
+              command,
+              resultText: result.value,
             };
           }
 

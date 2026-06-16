@@ -20,23 +20,23 @@ export const call: LocalCommandCall = async args => {
 
   switch (action) {
     case 'status':
-      return { type: 'text', value: formatTraceStatus() }
+      return { type: 'display', value: formatTraceStatus() }
     case 'tail':
       return {
-        type: 'text',
+        type: 'display',
         value: `Trace tail command:\n${TAIL_COMMAND}`,
       }
     case 'off':
       endTraceSession({ reason: 'trace command disabled tracing' })
       clearActiveTraceSession()
       saveTraceConfig({ ...loadTraceConfig(), mode: 'off' })
-      return { type: 'text', value: formatTraceStatus() }
+      return { type: 'display', value: formatTraceStatus() }
     case 'learn':
     case 'full':
       saveTraceConfig({ ...loadTraceConfig(), mode: action })
       startCurrentTraceSessionIfNeeded()
       return {
-        type: 'text',
+        type: 'display',
         value: `${formatTraceStatus()}\n\nTail window auto-launch is not available yet. Run:\n${TAIL_COMMAND}`,
       }
   }
