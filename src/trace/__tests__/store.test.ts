@@ -44,6 +44,14 @@ describe('trace store', () => {
     )
   })
 
+  test('rejects trace event paths for unsafe session ids', () => {
+    for (const sessionId of ['', '..', '../outside', '..\\outside', traceDir]) {
+      expect(() => getTraceEventsPath(sessionId)).toThrow(
+        'Invalid trace session id',
+      )
+    }
+  })
+
   test('appends trace events and reads valid non-empty JSONL lines', async () => {
     const first = makeTraceEvent({ eventId: 'event-1', sequence: 1 })
     const second = makeTraceEvent({ eventId: 'event-2', sequence: 2 })
@@ -56,6 +64,15 @@ describe('trace store', () => {
       `${JSON.stringify(first)}\n\n${JSON.stringify(second)}\n`,
     )
     expect(readTraceEvents(first.sessionId)).toEqual([first, second])
+  })
+
+  test('rejects unsafe session ids when appending or reading events', () => {
+    expect(() =>
+      appendTraceEvent(makeTraceEvent({ sessionId: '../outside' })),
+    ).toThrow('Invalid trace session id')
+    expect(() => readTraceEvents('..\\outside')).toThrow(
+      'Invalid trace session id',
+    )
   })
 
   test('returns null when no active trace session exists', () => {
