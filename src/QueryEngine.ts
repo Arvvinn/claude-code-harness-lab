@@ -270,8 +270,8 @@ export class QueryEngine {
 
     this.discoveredSkillNames.clear()
     this.permissionDenials = []
-    const startTime = Date.now()
     let traceTurnId: string | undefined
+    let traceTurnStartedAt: number | undefined
     let traceTurnStarted: boolean | undefined
     let traceTurnSuccess: boolean | undefined
     let traceTurnError: boolean | undefined
@@ -283,6 +283,7 @@ export class QueryEngine {
       if (feature('HARNESS_TRACE')) {
         if (isTraceSessionActive()) {
           traceTurnStarted = true
+          traceTurnStartedAt = Date.now()
           traceTurnId = randomUUID()
           emitTrace({
             source: 'query',
@@ -299,6 +300,7 @@ export class QueryEngine {
       }
 
       setCwd(cwd)
+      const startTime = Date.now()
       const persistSession = !isSessionPersistenceDisabled()
 
       // Wrap canUseTool to track permission denials
@@ -764,7 +766,7 @@ export class QueryEngine {
         ? countToolCalls(this.mutableMessages, SYNTHETIC_OUTPUT_TOOL_NAME)
         : 0
 
-      for await (const message of query({
+      const queryParams: Parameters<typeof query>[0] = {
         messages,
         systemPrompt,
         userContext,
@@ -773,10 +775,17 @@ export class QueryEngine {
         toolUseContext: processUserInputContext,
         fallbackModel,
         querySource: 'sdk',
-        traceTurnId,
         maxTurns,
         taskBudget,
-      })) {
+      }
+
+      if (feature('HARNESS_TRACE')) {
+        if (traceTurnId !== undefined) {
+          queryParams.traceTurnId = traceTurnId
+        }
+      }
+
+      for await (const message of query(queryParams)) {
         // Record assistant, user, and compact boundary messages
         if (
           message.type === 'assistant' ||
@@ -1345,7 +1354,10 @@ export class QueryEngine {
             type: 'turn.end',
             turnId: traceTurnId,
             payload: {
-              durationMs: Date.now() - startTime,
+              durationMs:
+                traceTurnStartedAt === undefined
+                  ? 0
+                  : Date.now() - traceTurnStartedAt,
               success: traceTurnSuccess === true,
               error: traceTurnError === true,
               aborted: this.abortController.signal.aborted,

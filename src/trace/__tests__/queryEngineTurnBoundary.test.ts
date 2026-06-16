@@ -290,8 +290,139 @@ if (feature('HARNESS_TRACE')) {
   })
 } else {
   describe('QueryEngine trace turn boundaries', () => {
-    test('is gated behind HARNESS_TRACE', () => {
-      expect(true).toBe(true)
+    test('does not pass traceTurnId to query params when HARNESS_TRACE is disabled', async () => {
+      let capturedQueryParams: Record<string, unknown> | undefined
+
+      const queryMock = () => ({
+        query: async function* (params: Record<string, unknown>) {
+          capturedQueryParams = params
+          yield { type: 'stream_request_start' }
+          return { reason: 'completed' }
+        },
+      })
+      const processUserInputMock = () => ({
+        processUserInput: async () => ({
+          messages: [
+            {
+              type: 'user',
+              uuid: 'user-message-disabled-trace',
+              timestamp: new Date().toISOString(),
+              message: {
+                role: 'user',
+                content: 'hello',
+              },
+            },
+          ],
+          shouldQuery: true,
+          allowedTools: [],
+        }),
+      })
+      const queryContextMock = () => ({
+        fetchSystemPromptParts: async () => ({
+          defaultSystemPrompt: [],
+          userContext: {},
+          systemContext: {},
+        }),
+      })
+      mock.module('../../query.js', queryMock)
+      mock.module('../../query.ts', queryMock)
+      mock.module('src/query.js', queryMock)
+      mock.module('src/query.ts', queryMock)
+      mock.module(
+        '../../utils/processUserInput/processUserInput.js',
+        processUserInputMock,
+      )
+      mock.module(
+        '../../utils/processUserInput/processUserInput.ts',
+        processUserInputMock,
+      )
+      mock.module(
+        'src/utils/processUserInput/processUserInput.js',
+        processUserInputMock,
+      )
+      mock.module(
+        'src/utils/processUserInput/processUserInput.ts',
+        processUserInputMock,
+      )
+      mock.module('../../utils/queryContext.js', queryContextMock)
+      mock.module('../../utils/queryContext.ts', queryContextMock)
+      mock.module('src/utils/queryContext.js', queryContextMock)
+      mock.module('src/utils/queryContext.ts', queryContextMock)
+
+      const {
+        resetStateForTests,
+        setCwdState,
+        setOriginalCwd,
+        setProjectRoot,
+        setSessionPersistenceDisabled,
+      } = await import('../../bootstrap/state')
+      ;(globalThis as unknown as { MACRO: { VERSION: string } }).MACRO = {
+        VERSION: 'test',
+      }
+      const { QueryEngine } = await import('../../QueryEngine')
+      const { getEmptyToolPermissionContext } = await import('../../Tool')
+      const { createFileStateCacheWithSizeLimit } = await import(
+        '../../utils/fileStateCache'
+      )
+      const { resetTraceForTesting } = await import('../bus')
+
+      resetStateForTests()
+      resetTraceForTesting()
+      const cwd = await mkdtemp(join(tmpdir(), 'claude-query-engine-no-trace-'))
+
+      try {
+        process.env.ANTHROPIC_API_KEY = 'test-api-key'
+        setOriginalCwd(cwd)
+        setCwdState(cwd)
+        setProjectRoot(cwd)
+        setSessionPersistenceDisabled(true)
+
+        let appState: any = {
+          toolPermissionContext: getEmptyToolPermissionContext(),
+          fastMode: false,
+          mcp: {
+            tools: [],
+            clients: [],
+          },
+          effortValue: undefined,
+          advisorModel: undefined,
+          sessionHooks: new Map(),
+        }
+
+        const engine = new QueryEngine({
+          cwd,
+          tools: [],
+          commands: [],
+          mcpClients: [],
+          agents: [],
+          canUseTool: async (_tool, input) => ({
+            behavior: 'allow',
+            updatedInput: input,
+          }),
+          getAppState: () => appState,
+          setAppState: updater => {
+            appState = updater(appState)
+          },
+          readFileCache: createFileStateCacheWithSizeLimit(10),
+          customSystemPrompt: 'test system prompt',
+        })
+
+        for await (const _message of engine.submitMessage('hello')) {
+          // Drain the SDK generator so it reaches the mocked query call.
+        }
+
+        expect(capturedQueryParams).toBeDefined()
+        expect(Object.hasOwn(capturedQueryParams!, 'traceTurnId')).toBe(false)
+      } finally {
+        if (originalAnthropicApiKey === undefined) {
+          delete process.env.ANTHROPIC_API_KEY
+        } else {
+          process.env.ANTHROPIC_API_KEY = originalAnthropicApiKey
+        }
+        resetTraceForTesting()
+        resetStateForTests()
+        await rm(cwd, { recursive: true, force: true })
+      }
     })
   })
 }
