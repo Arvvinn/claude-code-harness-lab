@@ -182,8 +182,41 @@ describe('launchTraceTailWindow', () => {
     })
     expect(children).toHaveLength(6)
   })
+
+  test('clears launch timeouts when spawned launchers exit nonzero quickly', async () => {
+    const children: FakeChildProcess[] = []
+    resetTraceTailWindowForTesting()
+    setTraceTailWindowChildProcessSpawnForTesting(() => {
+      const child = new FakeChildProcess()
+      children.push(child)
+      queueMicrotask(() => {
+        child.emit('spawn')
+        child.emit('exit', 1, null)
+      })
+
+      return child
+    })
+
+    const result = await launchTraceTailWindow({
+      config: { mode: 'learn', autoTailWindow: true },
+      platform: 'linux',
+    })
+    await new Promise(resolve => setTimeout(resolve, 550))
+
+    expect(result).toMatchObject({
+      ok: false,
+      command: TRACE_TAIL_COMMAND,
+      reason: 'launch_failed',
+    })
+    expect(children).toHaveLength(3)
+    expect(children.map(child => child.unrefCalls)).toEqual([0, 0, 0])
+  })
 })
 
 class FakeChildProcess extends EventEmitter {
-  unref(): void {}
+  unrefCalls = 0
+
+  unref(): void {
+    this.unrefCalls += 1
+  }
 }

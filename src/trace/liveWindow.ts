@@ -197,16 +197,21 @@ async function spawnDetachedProcess(
   return new Promise(resolve => {
     let settled = false
     let settleTimeout: ReturnType<typeof setTimeout> | undefined
+    const clearSettleTimeout = () => {
+      if (settleTimeout === undefined) {
+        return
+      }
+
+      clearTimeout(settleTimeout)
+      settleTimeout = undefined
+    }
     const settle = (result: TraceTailWindowSpawnResult) => {
       if (settled) {
         return
       }
 
       settled = true
-
-      if (settleTimeout !== undefined) {
-        clearTimeout(settleTimeout)
-      }
+      clearSettleTimeout()
 
       resolve(result)
     }
@@ -244,11 +249,15 @@ async function spawnDetachedProcess(
         stdio: 'ignore',
         windowsHide: false,
       })
+      const scheduleSettleTimeout = () => {
+        clearSettleTimeout()
+        settleTimeout = setTimeout(() => {
+          child.unref()
+          settle({ ok: true })
+        }, 500)
+      }
 
-      settleTimeout = setTimeout(() => {
-        child.unref()
-        settle({ ok: true })
-      }, 500)
+      scheduleSettleTimeout()
 
       child.once('error', error => {
         settle({ ok: false, error })
@@ -258,10 +267,7 @@ async function spawnDetachedProcess(
           return
         }
 
-        settleTimeout = setTimeout(() => {
-          child.unref()
-          settle({ ok: true })
-        }, 500)
+        scheduleSettleTimeout()
       })
       child.once('exit', (code, signal) => {
         settleExit('exit', code, signal)
