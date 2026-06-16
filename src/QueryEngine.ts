@@ -274,11 +274,6 @@ export class QueryEngine {
     const persistSession = !isSessionPersistenceDisabled()
     const startTime = Date.now()
     let traceTurnId: string | undefined
-    if (feature('HARNESS_TRACE')) {
-      if (isTraceSessionActive()) {
-        traceTurnId = randomUUID()
-      }
-    }
     let traceTurnStarted: boolean | undefined
     let traceTurnSuccess: boolean | undefined
     let traceTurnError: boolean | undefined
@@ -287,6 +282,24 @@ export class QueryEngine {
     let traceTurnErrorName: string | undefined
 
     try {
+      if (feature('HARNESS_TRACE')) {
+        traceTurnStarted = true
+        if (traceTurnId === undefined && isTraceSessionActive()) {
+          traceTurnId = randomUUID()
+        }
+        emitTrace({
+          source: 'query',
+          type: 'turn.start',
+          turnId: traceTurnId,
+          payload: {
+            inputSource: getTraceInputSource(),
+            inputMode: 'prompt',
+            promptKind: typeof prompt === 'string' ? 'text' : 'blocks',
+            messageCountBefore: this.mutableMessages.length,
+          },
+        })
+      }
+
       // Wrap canUseTool to track permission denials
       const wrappedCanUseTool: CanUseToolFn = async (
         tool,
@@ -453,24 +466,6 @@ export class QueryEngine {
         )) {
           yield message
         }
-      }
-
-      if (feature('HARNESS_TRACE')) {
-        traceTurnStarted = true
-        if (traceTurnId === undefined && isTraceSessionActive()) {
-          traceTurnId = randomUUID()
-        }
-        emitTrace({
-          source: 'query',
-          type: 'turn.start',
-          turnId: traceTurnId,
-          payload: {
-            inputSource: getTraceInputSource(),
-            inputMode: 'prompt',
-            promptKind: typeof prompt === 'string' ? 'text' : 'blocks',
-            messageCountBefore: this.mutableMessages.length,
-          },
-        })
       }
 
       const {

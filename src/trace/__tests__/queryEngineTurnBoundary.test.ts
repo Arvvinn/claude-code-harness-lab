@@ -11,17 +11,21 @@ let traceDir = ''
 let originalProcessCwd = ''
 
 if (feature('HARNESS_TRACE')) {
+  let processUserInputCalls = 0
+  let fetchSystemPromptPartsImpl: () => Promise<{
+    defaultSystemPrompt: string[]
+    userContext: Record<string, string>
+    systemContext: Record<string, string>
+  }>
+
   const processUserInputMock = () => ({
     processUserInput: async () => {
+      processUserInputCalls += 1
       throw new Error('input processing failed for trace boundary test')
     },
   })
   const queryContextMock = () => ({
-    fetchSystemPromptParts: async () => ({
-      defaultSystemPrompt: [],
-      userContext: {},
-      systemContext: {},
-    }),
+    fetchSystemPromptParts: async () => fetchSystemPromptPartsImpl(),
   })
 
   mock.module(
@@ -81,6 +85,26 @@ if (feature('HARNESS_TRACE')) {
     }
   }
 
+  function createQueryEngine(
+    customSystemPrompt: string,
+  ): InstanceType<typeof QueryEngine> {
+    return new QueryEngine({
+      cwd: traceDir,
+      tools: [],
+      commands: [],
+      mcpClients: [],
+      agents: [],
+      canUseTool: async (_tool, input) => ({
+        behavior: 'allow',
+        updatedInput: input,
+      }),
+      getAppState,
+      setAppState,
+      readFileCache: createFileStateCacheWithSizeLimit(10),
+      customSystemPrompt,
+    })
+  }
+
   async function writeTraceConfig(config: TraceConfig): Promise<void> {
     await mkdir(getTraceRootDir(), { recursive: true })
     await writeFile(
@@ -101,6 +125,12 @@ if (feature('HARNESS_TRACE')) {
       setCwdState(traceDir)
       setProjectRoot(traceDir)
       appState = createAppState()
+      processUserInputCalls = 0
+      fetchSystemPromptPartsImpl = async () => ({
+        defaultSystemPrompt: [],
+        userContext: {},
+        systemContext: {},
+      })
       await writeTraceConfig({ mode: 'learn', autoTailWindow: true })
     })
 
@@ -134,21 +164,7 @@ if (feature('HARNESS_TRACE')) {
         argv: ['claude', '-p'],
       })
 
-      const engine = new QueryEngine({
-        cwd: traceDir,
-        tools: [],
-        commands: [],
-        mcpClients: [],
-        agents: [],
-        canUseTool: async (_tool, input) => ({
-          behavior: 'allow',
-          updatedInput: input,
-        }),
-        getAppState,
-        setAppState,
-        readFileCache: createFileStateCacheWithSizeLimit(10),
-        customSystemPrompt: 'test system prompt',
-      })
+      const engine = createQueryEngine('test system prompt')
 
       const rawPrompt = 'raw prompt must not appear in boundary payloads'
       await expect(engine.submitMessage(rawPrompt).next()).rejects.toThrow(
@@ -179,6 +195,53 @@ if (feature('HARNESS_TRACE')) {
         finalMessageCount: 0,
       })
       expect(JSON.stringify(boundaryEvents)).not.toContain(rawPrompt)
+    })
+
+    test('emits turn boundaries when system prompt setup throws before input processing', async () => {
+      fetchSystemPromptPartsImpl = async () => {
+        throw new Error('system prompt setup failed for trace boundary test')
+      }
+
+      startTraceSession({
+        sessionId: 'session-query-engine-system-prompt-error',
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+
+      const systemPromptText = 'test system prompt must not appear in trace'
+      const engine = createQueryEngine(systemPromptText)
+
+      const rawPrompt = 'raw prompt must not appear in setup boundary payloads'
+      await expect(engine.submitMessage(rawPrompt).next()).rejects.toThrow(
+        'system prompt setup failed for trace boundary test',
+      )
+      expect(processUserInputCalls).toBe(0)
+      await flushTraceForTesting()
+
+      const events = readTraceEvents('session-query-engine-system-prompt-error')
+      const boundaryEvents = events.filter(
+        event => event.type === 'turn.start' || event.type === 'turn.end',
+      )
+
+      expect(boundaryEvents.map(event => event.type)).toEqual([
+        'turn.start',
+        'turn.end',
+      ])
+      expect(boundaryEvents[0].turnId).toBe(boundaryEvents[1].turnId)
+      expect(boundaryEvents[0].payload).toMatchObject({
+        inputMode: 'prompt',
+        promptKind: 'text',
+        messageCountBefore: 0,
+      })
+      expect(boundaryEvents[1].payload).toMatchObject({
+        success: false,
+        error: true,
+        aborted: false,
+        errorName: 'Error',
+        finalMessageCount: 0,
+      })
+      expect(JSON.stringify(boundaryEvents)).not.toContain(rawPrompt)
+      expect(JSON.stringify(boundaryEvents)).not.toContain(systemPromptText)
     })
   })
 } else {
