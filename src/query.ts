@@ -327,29 +327,6 @@ type HarnessTraceQueryLoopMetadata = {
   finalMessageCount: number
 }
 
-const traceCountableMessageTypes = new Set<string>([
-  'assistant',
-  'user',
-  'system',
-  'attachment',
-  'progress',
-  'grouped_tool_use',
-  'collapsed_read_search',
-])
-
-function isTraceCountableMessage(value: unknown): value is Message {
-  if (typeof value !== 'object' || value === null) {
-    return false
-  }
-
-  const candidate = value as { type?: unknown; uuid?: unknown }
-  return (
-    typeof candidate.uuid === 'string' &&
-    typeof candidate.type === 'string' &&
-    traceCountableMessageTypes.has(candidate.type)
-  )
-}
-
 export async function* query(
   params: QueryParams,
 ): AsyncGenerator<
@@ -457,37 +434,66 @@ export async function* query(
   let didThrow = false
   let thrownError: unknown
   try {
-    const loop = queryLoop(
-      paramsForQuery,
-      consumedCommandUuids,
-      consumedAutonomyCommands,
-      harnessTraceLoopMetadata,
-    )
-    let loopDone = false
-    let loopResult = await loop.next()
-    try {
-      while (!loopResult.done) {
-        const yielded = loopResult.value
-        if (
-          harnessTraceLoopMetadata !== undefined &&
-          isTraceCountableMessage(yielded)
-        ) {
-          harnessTraceLoopMetadata.finalMessageCount += 1
+    if (harnessTraceLoopMetadata !== undefined) {
+      const traceCountableMessageTypes = new Set<string>([
+        'assistant',
+        'user',
+        'system',
+        'attachment',
+        'progress',
+        'grouped_tool_use',
+        'collapsed_read_search',
+      ])
+
+      function isTraceCountableMessage(value: unknown): value is Message {
+        if (typeof value !== 'object' || value === null) {
+          return false
         }
 
-        try {
-          const nextInput = yield yielded
-          loopResult = await loop.next(nextInput)
-        } catch (yieldError) {
-          loopResult = await loop.throw(yieldError)
+        const candidate = value as { type?: unknown; uuid?: unknown }
+        return (
+          typeof candidate.uuid === 'string' &&
+          typeof candidate.type === 'string' &&
+          traceCountableMessageTypes.has(candidate.type)
+        )
+      }
+
+      const loop = queryLoop(
+        paramsForQuery,
+        consumedCommandUuids,
+        consumedAutonomyCommands,
+        harnessTraceLoopMetadata,
+      )
+      let loopDone = false
+      let loopResult = await loop.next()
+      try {
+        while (!loopResult.done) {
+          const yielded = loopResult.value
+          if (isTraceCountableMessage(yielded)) {
+            harnessTraceLoopMetadata.finalMessageCount += 1
+          }
+
+          try {
+            const nextInput = yield yielded
+            loopResult = await loop.next(nextInput)
+          } catch (yieldError) {
+            loopResult = await loop.throw(yieldError)
+          }
+        }
+        loopDone = true
+        terminal = loopResult.value
+      } finally {
+        if (!loopDone) {
+          await loop.return(undefined as unknown as Terminal)
         }
       }
-      loopDone = true
-      terminal = loopResult.value
-    } finally {
-      if (!loopDone) {
-        await loop.return(undefined as unknown as Terminal)
-      }
+    } else {
+      terminal = yield* queryLoop(
+        paramsForQuery,
+        consumedCommandUuids,
+        consumedAutonomyCommands,
+        harnessTraceLoopMetadata,
+      )
     }
   } catch (error) {
     didThrow = true

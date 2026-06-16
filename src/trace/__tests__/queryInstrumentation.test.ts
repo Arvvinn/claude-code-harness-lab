@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,6 +23,37 @@ const { readTraceEvents } = await import('../store')
 const originalTraceDir = process.env.CLAUDE_CODE_TRACE_DIR
 let traceDir = ''
 let originalProcessCwd = ''
+
+describe('query trace delegation invariants', () => {
+  test('uses manual trace counting delegation only for direct trace-owned turns', () => {
+    const querySource = readFileSync(
+      new URL('../../query.ts', import.meta.url),
+      'utf8',
+    )
+
+    const guardedBranchStart = querySource.indexOf(
+      'if (harnessTraceLoopMetadata !== undefined) {',
+    )
+    const manualDelegationStart = querySource.indexOf(
+      'const loop = queryLoop(',
+      guardedBranchStart,
+    )
+    const nativeDelegationStart = querySource.indexOf(
+      '} else {\n      terminal = yield* queryLoop(',
+      manualDelegationStart,
+    )
+
+    expect(guardedBranchStart).toBeGreaterThanOrEqual(0)
+    expect(manualDelegationStart).toBeGreaterThan(guardedBranchStart)
+    expect(nativeDelegationStart).toBeGreaterThan(manualDelegationStart)
+    expect(
+      querySource.slice(guardedBranchStart, manualDelegationStart),
+    ).toContain('function isTraceCountableMessage')
+    expect(
+      querySource.slice(manualDelegationStart, nativeDelegationStart),
+    ).toContain('isTraceCountableMessage(yielded)')
+  })
+})
 
 if (feature('HARNESS_TRACE')) {
   describe('query trace instrumentation', () => {
