@@ -300,8 +300,8 @@ export class QueryEngine {
       }
 
       setCwd(cwd)
-      const startTime = Date.now()
       const persistSession = !isSessionPersistenceDisabled()
+      const startTime = Date.now()
 
       // Wrap canUseTool to track permission denials
       const wrappedCanUseTool: CanUseToolFn = async (
