@@ -237,6 +237,53 @@ function getAutonomyTurnOutcome(params: {
   }
 }
 
+function getTraceMessageTextCharCount(messages: Message[]): number {
+  let inputChars = 0
+
+  for (const message of messages) {
+    if (message.type !== 'user') {
+      continue
+    }
+
+    inputChars += getTraceContentTextCharCount(
+      (message as UserMessage).message?.content,
+    )
+  }
+
+  return inputChars
+}
+
+function getTraceContentTextCharCount(content: unknown): number {
+  if (typeof content === 'string') {
+    return content.length
+  }
+
+  if (!Array.isArray(content)) {
+    return 0
+  }
+
+  let inputChars = 0
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) {
+      continue
+    }
+
+    const record = block as Record<string, unknown>
+    if (record.type === 'text' && typeof record.text === 'string') {
+      inputChars += record.text.length
+    }
+  }
+
+  return inputChars
+}
+
+function getTraceMessageTypeCount(
+  messages: Message[],
+  type: Message['type'],
+): number {
+  return messages.filter(message => message.type === type).length
+}
+
 export type QueryParams = {
   messages: Message[]
   systemPrompt: SystemPrompt
@@ -316,10 +363,53 @@ export async function* query(
       }
     : params
   let paramsWithHarnessTrace = paramsWithTrace
+  let ownsHarnessTraceTurn: boolean | undefined
+  let harnessTraceTurnStartedAt: number | undefined
   if (feature('HARNESS_TRACE')) {
     let traceTurnId = params.traceTurnId
     if (isTraceSessionActive()) {
-      traceTurnId ??= randomUUID()
+      if (traceTurnId === undefined) {
+        traceTurnId = randomUUID()
+        ownsHarnessTraceTurn = true
+        harnessTraceTurnStartedAt = Date.now()
+        const messageCount = params.messages.length
+        const userMessageCount = getTraceMessageTypeCount(
+          params.messages,
+          'user',
+        )
+        const isNonInteractiveSession =
+          params.toolUseContext.options.isNonInteractiveSession === true
+        const hasAgent = Boolean(params.toolUseContext.agentId)
+        emitTrace({
+          source: 'query',
+          type: 'turn.start',
+          turnId: traceTurnId,
+          payload: {
+            inputSource: params.querySource,
+            inputMode: 'messages',
+            messageCount,
+            userMessageCount,
+            querySource: params.querySource,
+            isNonInteractiveSession,
+            hasAgent,
+          },
+        })
+        emitTrace({
+          source: 'query',
+          type: 'user.input_received',
+          turnId: traceTurnId,
+          payload: {
+            inputSource: params.querySource,
+            inputMode: 'messages',
+            inputChars: getTraceMessageTextCharCount(params.messages),
+            messageCount,
+            userMessageCount,
+            querySource: params.querySource,
+            isNonInteractiveSession,
+            hasAgent,
+          },
+        })
+      }
     }
     if (traceTurnId !== undefined) {
       paramsWithHarnessTrace = {
@@ -343,6 +433,45 @@ export async function* query(
     thrownError = error
     throw error
   } finally {
+    if (feature('HARNESS_TRACE')) {
+      if (ownsHarnessTraceTurn === true) {
+        const isAborted =
+          paramsWithHarnessTrace.toolUseContext.abortController.signal
+            .aborted ||
+          terminal?.reason === 'aborted_streaming' ||
+          terminal?.reason === 'aborted_tools'
+        const isError = didThrow || terminal?.reason === 'model_error'
+        const errorName =
+          didThrow && thrownError instanceof Error
+            ? thrownError.name
+            : didThrow
+              ? typeof thrownError
+              : terminal?.reason === 'model_error' &&
+                  terminal.error instanceof Error
+                ? terminal.error.name
+                : undefined
+
+        emitTrace({
+          source: 'query',
+          type: 'turn.end',
+          turnId: paramsWithHarnessTrace.traceTurnId,
+          payload: {
+            durationMs:
+              harnessTraceTurnStartedAt === undefined
+                ? 0
+                : Date.now() - harnessTraceTurnStartedAt,
+            success: !didThrow && terminal?.reason === 'completed',
+            error: isError,
+            aborted: isAborted,
+            resultReason: terminal?.reason ?? (didThrow ? 'thrown' : null),
+            stopReason: terminal?.reason ?? null,
+            finalMessageCount: paramsWithHarnessTrace.messages.length,
+            ...(errorName ? { errorName } : {}),
+          },
+        })
+      }
+    }
+
     await finalizeAutonomyCommandsForTurn({
       commands: consumedAutonomyCommands,
       outcome: getAutonomyTurnOutcome({

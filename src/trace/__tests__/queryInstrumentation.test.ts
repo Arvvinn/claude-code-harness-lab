@@ -12,12 +12,8 @@ const { query } = await import('../../query')
 const { getEmptyToolPermissionContext } = await import('../../Tool')
 const { createUserMessage } = await import('../../utils/messages')
 const { asSystemPrompt } = await import('../../utils/systemPromptType')
-const {
-  emitTrace,
-  flushTraceForTesting,
-  resetTraceForTesting,
-  startTraceSession,
-} = await import('../bus')
+const { flushTraceForTesting, resetTraceForTesting, startTraceSession } =
+  await import('../bus')
 const { getTraceConfigPath, getTraceEventsPath, getTraceRootDir } =
   await import('../paths')
 const { readTraceEvents } = await import('../store')
@@ -58,7 +54,7 @@ if (feature('HARNESS_TRACE')) {
       await rm(traceDir, { recursive: true, force: true })
     })
 
-    test('emits loop boundaries with turn metadata and no prompt text', async () => {
+    test('emits loop boundaries with provided turn metadata and no prompt text', async () => {
       startTraceSession({
         sessionId: 'session-query-loop',
         cwd: traceDir,
@@ -93,24 +89,21 @@ if (feature('HARNESS_TRACE')) {
         deps: deps as never,
       })
 
-      let next = await generator.next()
-      while (!next.done) {
-        next = await generator.next()
-      }
-
-      emitTrace({
-        source: 'query',
-        type: 'turn.end',
-        turnId: 'turn-query-test',
-        payload: { marker: 'after-query' },
-      })
+      await drainQuery(generator)
       await flushTraceForTesting()
 
       const events = readTraceEvents('session-query-loop')
+      const queryEvents = events.filter(
+        event => event.type !== 'trace.session_start',
+      )
       const loopEvents = events.filter(event =>
         event.type.startsWith('query.loop_'),
       )
 
+      expect(queryEvents.map(event => event.type)).toEqual([
+        'query.loop_start',
+        'query.loop_end',
+      ])
       expect(loopEvents.map(event => event.type)).toEqual([
         'query.loop_start',
         'query.loop_end',
@@ -134,6 +127,79 @@ if (feature('HARNESS_TRACE')) {
         'session-query-loop',
       )
     })
+
+    test('emits direct query turn boundaries with a trace-only turn id and no prompt text', async () => {
+      startTraceSession({
+        sessionId: 'session-query-direct',
+        cwd: traceDir,
+        argv: ['claude'],
+      })
+
+      const deps = {
+        uuid: () => 'query-chain-id',
+        microcompact: async (messages: unknown[]) => ({ messages }),
+        autocompact: async () => ({
+          compactionResult: undefined,
+          consecutiveFailures: 0,
+        }),
+        callModel: async function* () {
+          yield createAssistantMessage()
+        },
+      }
+
+      const rawPrompt = 'direct query raw prompt must not appear in trace'
+      const generator = query({
+        messages: [createUserMessage({ content: rawPrompt })],
+        systemPrompt: asSystemPrompt([]),
+        userContext: {},
+        systemContext: {},
+        canUseTool: async (_tool, input) => ({
+          behavior: 'allow',
+          updatedInput: input,
+        }),
+        toolUseContext: createToolUseContext(),
+        querySource: 'repl_main_thread',
+        deps: deps as never,
+      })
+
+      await drainQuery(generator)
+      await flushTraceForTesting()
+
+      const events = readTraceEvents('session-query-direct')
+      const queryEvents = events.filter(
+        event => event.type !== 'trace.session_start',
+      )
+
+      expect(queryEvents.map(event => event.type)).toEqual([
+        'turn.start',
+        'user.input_received',
+        'query.loop_start',
+        'query.loop_end',
+        'turn.end',
+      ])
+
+      const turnIds = queryEvents.map(event => event.turnId)
+      expect(turnIds.every(turnId => typeof turnId === 'string')).toBe(true)
+      expect(new Set(turnIds).size).toBe(1)
+      expect(queryEvents[0].payload).toMatchObject({
+        inputMode: 'messages',
+        messageCount: 1,
+        querySource: 'repl_main_thread',
+      })
+      expect(queryEvents[1].payload).toMatchObject({
+        inputMode: 'messages',
+        inputChars: rawPrompt.length,
+        messageCount: 1,
+        querySource: 'repl_main_thread',
+      })
+      expect(queryEvents[4].payload).toMatchObject({
+        success: true,
+        error: false,
+        aborted: false,
+        stopReason: 'completed',
+      })
+      expect(JSON.stringify(events)).not.toContain(rawPrompt)
+    })
   })
 } else {
   describe('query trace instrumentation', () => {
@@ -141,6 +207,13 @@ if (feature('HARNESS_TRACE')) {
       expect(true).toBe(true)
     })
   })
+}
+
+async function drainQuery(generator: ReturnType<typeof query>): Promise<void> {
+  let next = await generator.next()
+  while (!next.done) {
+    next = await generator.next()
+  }
 }
 
 function createAssistantMessage(): AssistantMessage {
