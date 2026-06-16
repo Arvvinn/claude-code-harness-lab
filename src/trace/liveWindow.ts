@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type SpawnOptions } from 'node:child_process'
 import { loadTraceConfig } from './config.js'
 import type { TraceConfig } from './types.js'
 
@@ -29,6 +29,17 @@ export type TraceTailWindowSpawn = (
   args: string[],
 ) => Promise<TraceTailWindowSpawnResult>
 
+type TraceTailWindowChildProcess = {
+  once(event: string, listener: (...args: unknown[]) => void): unknown
+  unref(): void
+}
+
+type TraceTailWindowChildProcessSpawn = (
+  executable: string,
+  args: string[],
+  options: SpawnOptions,
+) => TraceTailWindowChildProcess
+
 export interface LaunchTraceTailWindowOptions {
   config?: TraceConfig
   platform?: typeof process.platform
@@ -41,6 +52,7 @@ interface LauncherCandidate {
 
 let launchSucceeded = false
 let spawnForTesting: TraceTailWindowSpawn | null = null
+let childProcessSpawnForTesting: TraceTailWindowChildProcessSpawn | null = null
 
 export async function launchTraceTailWindow(
   options: LaunchTraceTailWindowOptions = {},
@@ -113,9 +125,16 @@ export function setTraceTailWindowSpawnForTesting(
   spawnForTesting = spawnDetached
 }
 
+export function setTraceTailWindowChildProcessSpawnForTesting(
+  childProcessSpawn: TraceTailWindowChildProcessSpawn,
+): void {
+  childProcessSpawnForTesting = childProcessSpawn
+}
+
 export function resetTraceTailWindowForTesting(): void {
   launchSucceeded = false
   spawnForTesting = null
+  childProcessSpawnForTesting = null
 }
 
 function getLauncherCandidates(
@@ -191,9 +210,36 @@ async function spawnDetachedProcess(
 
       resolve(result)
     }
+    const settleExit = (
+      eventName: 'exit' | 'close',
+      code: unknown,
+      signal: unknown,
+    ) => {
+      const action = eventName === 'exit' ? 'exited' : 'closed'
+
+      if (typeof signal === 'string') {
+        settle({
+          ok: false,
+          error: new Error(`${executable} ${action} with signal ${signal}`),
+        })
+        return
+      }
+
+      if (code === 0) {
+        settle({ ok: true })
+        return
+      }
+
+      const exitCode = typeof code === 'number' ? code : 'unknown'
+      settle({
+        ok: false,
+        error: new Error(`${executable} ${action} with code ${exitCode}`),
+      })
+    }
 
     try {
-      const child = spawn(executable, args, {
+      const spawnChildProcess = childProcessSpawnForTesting ?? spawn
+      const child = spawnChildProcess(executable, args, {
         detached: true,
         stdio: 'ignore',
         windowsHide: false,
@@ -208,8 +254,20 @@ async function spawnDetachedProcess(
         settle({ ok: false, error })
       })
       child.once('spawn', () => {
-        child.unref()
-        settle({ ok: true })
+        if (settled) {
+          return
+        }
+
+        settleTimeout = setTimeout(() => {
+          child.unref()
+          settle({ ok: true })
+        }, 500)
+      })
+      child.once('exit', (code, signal) => {
+        settleExit('exit', code, signal)
+      })
+      child.once('close', (code, signal) => {
+        settleExit('close', code, signal)
       })
     } catch (error) {
       settle({ ok: false, error })

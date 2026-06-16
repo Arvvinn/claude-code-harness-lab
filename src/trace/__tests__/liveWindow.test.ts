@@ -1,7 +1,9 @@
+import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
   TRACE_TAIL_COMMAND,
   launchTraceTailWindow,
+  setTraceTailWindowChildProcessSpawnForTesting,
   resetTraceTailWindowForTesting,
   setTraceTailWindowSpawnForTesting,
 } from '../liveWindow.js'
@@ -144,4 +146,44 @@ describe('launchTraceTailWindow', () => {
     })
     expect(calls).toHaveLength(6)
   })
+
+  test('treats launchers that spawn then exit nonzero as failed launches', async () => {
+    const children: FakeChildProcess[] = []
+    resetTraceTailWindowForTesting()
+    setTraceTailWindowChildProcessSpawnForTesting(() => {
+      const child = new FakeChildProcess()
+      children.push(child)
+      queueMicrotask(() => {
+        child.emit('spawn')
+        child.emit('exit', 1, null)
+      })
+
+      return child
+    })
+
+    const first = await launchTraceTailWindow({
+      config: { mode: 'learn', autoTailWindow: true },
+      platform: 'linux',
+    })
+    const second = await launchTraceTailWindow({
+      config: { mode: 'learn', autoTailWindow: true },
+      platform: 'linux',
+    })
+
+    expect(first).toMatchObject({
+      ok: false,
+      command: TRACE_TAIL_COMMAND,
+      reason: 'launch_failed',
+    })
+    expect(second).toMatchObject({
+      ok: false,
+      command: TRACE_TAIL_COMMAND,
+      reason: 'launch_failed',
+    })
+    expect(children).toHaveLength(6)
+  })
 })
+
+class FakeChildProcess extends EventEmitter {
+  unref(): void {}
+}
