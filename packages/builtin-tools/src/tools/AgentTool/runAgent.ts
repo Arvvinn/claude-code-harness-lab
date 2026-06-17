@@ -16,7 +16,7 @@ import { query } from 'src/query.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
 import { getDumpPromptsPath } from 'src/services/api/dumpPrompts.js'
 import { cleanupAgentTracking } from 'src/services/api/promptCacheBreakDetection.js'
-import { emitTrace, getTraceMode } from 'src/trace/bus.js'
+import { emitTrace, getTraceMode, isTraceSessionActive } from 'src/trace/bus.js'
 import {
   connectToServer,
   fetchToolsForClient,
@@ -973,28 +973,33 @@ export async function* runAgent({
   const traceAgentName = agentDefinition.filename ?? agentDefinition.agentType
   const traceParentToolUseId = toolUseContext.toolUseId
   const traceParentAgentId = toolUseContext.agentId
-  const traceStartedAt = Date.now()
+  let traceStartedAt = 0
   let traceStatus: SubagentStatus = 'completed'
   let traceFinalMessageCount = 0
   let traceToolUseCount = 0
+  let collectSubagentTraceStats = false
 
   if (feature('HARNESS_TRACE')) {
     const traceMode = getTraceMode()
-    if (traceMode === 'learn' || traceMode === 'full') {
-      emitTrace({
-        parentId: traceParentToolUseId ?? traceParentAgentId,
-        source: 'subagent',
-        type: 'subagent.started',
-        payload: buildSubagentStartedTracePayload({
-          agentType: agentDefinition.agentType,
-          agentName: traceAgentName,
-          agentId,
-          parentToolUseId: traceParentToolUseId,
-          parentAgentId: traceParentAgentId,
-          mode: traceMode,
-          promptMessages: initialMessages,
-        }),
-      })
+    if (isTraceSessionActive()) {
+      if (traceMode === 'learn' || traceMode === 'full') {
+        collectSubagentTraceStats = true
+        traceStartedAt = Date.now()
+        emitTrace({
+          parentId: traceParentToolUseId ?? traceParentAgentId,
+          source: 'subagent',
+          type: 'subagent.started',
+          payload: buildSubagentStartedTracePayload({
+            agentType: agentDefinition.agentType,
+            agentName: traceAgentName,
+            agentId,
+            parentToolUseId: traceParentToolUseId,
+            parentAgentId: traceParentAgentId,
+            mode: traceMode,
+            promptMessages: initialMessages,
+          }),
+        })
+      }
     }
   }
 
@@ -1044,8 +1049,10 @@ export async function* runAgent({
       }
 
       if (isRecordableMessage(message)) {
-        traceFinalMessageCount += 1
-        traceToolUseCount += countToolUsesInMessage(message)
+        if (collectSubagentTraceStats) {
+          traceFinalMessageCount += 1
+          traceToolUseCount += countToolUsesInMessage(message)
+        }
         // Record only the new message with correct parent (O(1) per message)
         await recordSidechainTranscript(
           [message],
@@ -1073,7 +1080,7 @@ export async function* runAgent({
     traceStatus = error instanceof AbortError ? 'aborted' : 'error'
     throw error
   } finally {
-    if (feature('HARNESS_TRACE')) {
+    if (collectSubagentTraceStats) {
       emitTrace({
         parentId: traceParentToolUseId ?? traceParentAgentId,
         source: 'subagent',
