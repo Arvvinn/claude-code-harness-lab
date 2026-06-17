@@ -282,11 +282,12 @@ function buildAPIRequestTracePayload(
     provider: string
     querySource?: QuerySource
   },
+  mode: ActiveTraceMode = 'learn',
 ): Record<string, unknown> {
   const request = params as Record<string, unknown>
   const outputConfig = getObjectFieldForTrace(request.output_config)
 
-  return removeUndefinedTraceFields({
+  const payload = removeUndefinedTraceFields({
     provider: input.provider,
     model: getStringFieldForTrace(request.model),
     querySource: input.querySource,
@@ -308,6 +309,15 @@ function buildAPIRequestTracePayload(
     clientRequestId: input.clientRequestId,
     previousRequestId: input.previousRequestId,
   })
+
+  if (mode === 'full') {
+    return {
+      ...payload,
+      rawRequestParams: params,
+    }
+  }
+
+  return payload
 }
 
 function buildAPIStreamEventTracePayload(
@@ -338,7 +348,6 @@ function buildAPIStreamEventTracePayload(
         return {
           ...payload,
           messageId: event.message.id,
-          responseModel: event.message.model,
         }
       case 'content_block_start':
         return {
@@ -350,7 +359,6 @@ function buildAPIStreamEventTracePayload(
         return {
           ...payload,
           contentBlockIndex: event.index,
-          deltaType: event.delta.type,
         }
       case 'content_block_stop':
         return {
@@ -558,7 +566,6 @@ function summarizeContentBlockForLearnTrace(
   const blockRecord = block as unknown as Record<string, unknown>
 
   return removeUndefinedTraceFields({
-    contentBlockType: block.type,
     contentBlockId: getStringFieldForTrace(blockRecord.id),
   })
 }
@@ -1265,12 +1272,20 @@ export async function* executeNonStreamingRequest(
       }),
     async (anthropic, attempt, context) => {
       try {
+        let traceMode: ActiveTraceMode | undefined
+        if (feature('HARNESS_TRACE')) {
+          const currentTraceMode = getTraceMode()
+          if (currentTraceMode !== 'off') {
+            traceMode = currentTraceMode
+          }
+        }
         return await runNonStreamingRequestAttempt(
           {
             attempt,
             previousRequestId: originatingRequestId ?? undefined,
             provider: getAPIProvider(),
             querySource: retryOptions.querySource,
+            traceMode,
           },
           context,
           paramsFromContext,
@@ -1351,6 +1366,7 @@ export async function runNonStreamingRequestAttempt(
     previousRequestId?: string
     provider: string
     querySource?: QuerySource
+    traceMode?: ActiveTraceMode
   },
   context: RetryContext,
   paramsFromContext: (context: RetryContext) => BetaMessageStreamParams,
@@ -1370,7 +1386,11 @@ export async function runNonStreamingRequestAttempt(
     emitTraceEvent({
       source: 'api',
       type: 'api.request_built',
-      payload: buildAPIRequestTracePayload(retryParams, input),
+      payload: buildAPIRequestTracePayload(
+        retryParams,
+        input,
+        input.traceMode ?? 'learn',
+      ),
     })
   }
 
@@ -2399,17 +2419,24 @@ async function* queryModel(
             : undefined
 
         if (feature('HARNESS_TRACE')) {
-          emitTrace({
-            source: 'api',
-            type: 'api.request_built',
-            payload: buildAPIRequestTracePayload(params, {
-              attempt,
-              clientRequestId,
-              previousRequestId,
-              provider: getAPIProvider(),
-              querySource: options.querySource,
-            }),
-          })
+          const traceMode = getTraceMode()
+          if (traceMode !== 'off') {
+            emitTrace({
+              source: 'api',
+              type: 'api.request_built',
+              payload: buildAPIRequestTracePayload(
+                params,
+                {
+                  attempt,
+                  clientRequestId,
+                  previousRequestId,
+                  provider: getAPIProvider(),
+                  querySource: options.querySource,
+                },
+                traceMode,
+              ),
+            })
+          }
         }
 
         // Fire immediately before the fetch is dispatched. .withResponse() below

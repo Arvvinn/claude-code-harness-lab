@@ -328,9 +328,37 @@ describe('claude API trace instrumentation behavior boundaries', () => {
         provider: 'firstParty',
         querySource: 'sdk',
       },
+      'learn',
     )
 
-    const streamPayload =
+    const messageStartPayload =
+      claudeApiTraceInternals.buildAPIStreamEventTracePayload(
+        {
+          type: 'message_start',
+          message: {
+            id: 'msg_123',
+            model: 'claude-leaky-model',
+            role: 'assistant',
+            type: 'message',
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: {
+              input_tokens: 999,
+              output_tokens: 0,
+            },
+          },
+        } as unknown as BetaRawMessageStreamEvent,
+        {
+          attempt: 1,
+          clientRequestId: 'client-1',
+          elapsedMs: 41,
+          provider: 'firstParty',
+          requestId: 'req_stream',
+        },
+        'learn',
+      )
+    const contentBlockStartPayload =
       claudeApiTraceInternals.buildAPIStreamEventTracePayload(
         {
           type: 'content_block_start',
@@ -353,6 +381,49 @@ describe('claude API trace instrumentation behavior boundaries', () => {
         },
         'learn',
       )
+    const contentBlockDeltaPayload =
+      claudeApiTraceInternals.buildAPIStreamEventTracePayload(
+        {
+          type: 'content_block_delta',
+          index: 0,
+          delta: {
+            type: 'text_delta',
+            text: 'raw delta text should not be recorded',
+          },
+        } as unknown as BetaRawMessageStreamEvent,
+        {
+          attempt: 1,
+          clientRequestId: 'client-1',
+          elapsedMs: 43,
+          provider: 'firstParty',
+          requestId: 'req_stream',
+          timeSincePreviousEventMs: 1,
+        },
+        'learn',
+      )
+    const messageDeltaPayload =
+      claudeApiTraceInternals.buildAPIStreamEventTracePayload(
+        {
+          type: 'message_delta',
+          delta: {
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+          },
+          usage: {
+            input_tokens: 999,
+            output_tokens: 123,
+          },
+        } as unknown as BetaRawMessageStreamEvent,
+        {
+          attempt: 1,
+          clientRequestId: 'client-1',
+          elapsedMs: 44,
+          provider: 'firstParty',
+          requestId: 'req_stream',
+          timeSincePreviousEventMs: 1,
+        },
+        'learn',
+      )
 
     expect(requestPayload).toMatchObject({
       attempt: 1,
@@ -366,20 +437,52 @@ describe('claude API trace instrumentation behavior boundaries', () => {
       provider: 'firstParty',
       querySource: 'sdk',
     })
-    expect(streamPayload).toMatchObject({
+    expect(messageStartPayload).toEqual({
+      attempt: 1,
+      clientRequestId: 'client-1',
+      elapsedMs: 41,
+      eventType: 'message_start',
+      messageId: 'msg_123',
+      provider: 'firstParty',
+      requestId: 'req_stream',
+    })
+    expect(contentBlockStartPayload).toMatchObject({
       attempt: 1,
       clientRequestId: 'client-1',
       contentBlockIndex: 0,
       contentBlockId: 'toolu_123',
-      contentBlockType: 'tool_use',
       elapsedMs: 42,
       eventType: 'content_block_start',
       provider: 'firstParty',
       requestId: 'req_stream',
     })
+    expect(contentBlockDeltaPayload).toEqual({
+      attempt: 1,
+      clientRequestId: 'client-1',
+      contentBlockIndex: 0,
+      elapsedMs: 43,
+      eventType: 'content_block_delta',
+      provider: 'firstParty',
+      requestId: 'req_stream',
+      timeSincePreviousEventMs: 1,
+    })
+    expect(messageDeltaPayload).toEqual({
+      attempt: 1,
+      clientRequestId: 'client-1',
+      elapsedMs: 44,
+      eventType: 'message_delta',
+      provider: 'firstParty',
+      requestId: 'req_stream',
+      timeSincePreviousEventMs: 1,
+    })
 
     const serializedRequestPayload = JSON.stringify(requestPayload)
-    const serializedStreamPayload = JSON.stringify(streamPayload)
+    const serializedStreamPayload = JSON.stringify([
+      messageStartPayload,
+      contentBlockStartPayload,
+      contentBlockDeltaPayload,
+      messageDeltaPayload,
+    ])
 
     expect(serializedRequestPayload).not.toContain('top secret prompt text')
     expect(serializedRequestPayload).not.toContain('super-secret')
@@ -387,10 +490,67 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     expect(serializedStreamPayload).not.toContain(
       'raw tool input should not be recorded',
     )
+    expect(serializedStreamPayload).not.toContain(
+      'raw delta text should not be recorded',
+    )
+    expect(serializedStreamPayload).not.toContain('claude-leaky-model')
     expect(serializedStreamPayload).not.toContain('dangerous_tool_name')
+    expect(serializedStreamPayload).not.toContain('contentBlockType')
+    expect(serializedStreamPayload).not.toContain('deltaType')
     expect(serializedStreamPayload).not.toContain('usage')
     expect(serializedStreamPayload).not.toContain('stopReason')
     expect(serializedStreamPayload).not.toContain('rawEvent')
+  })
+
+  test('full-mode request_built payloads include raw request params that redact secret values', () => {
+    const requestParams = {
+      model: 'claude-test',
+      max_tokens: 256,
+      messages: [
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'full trace prompt content' }],
+        },
+      ],
+      tools: [{ name: 'search' }],
+      betas: ['beta-a'],
+      headers: {
+        authorization: 'Bearer request-secret',
+      },
+      metadata: {
+        api_key: 'sk-request-secret',
+      },
+    }
+
+    const payload = claudeApiTraceInternals.buildAPIRequestTracePayload(
+      requestParams,
+      {
+        attempt: 1,
+        clientRequestId: 'client-1',
+        previousRequestId: 'prev-1',
+        provider: 'firstParty',
+        querySource: 'sdk',
+      },
+      'full',
+    )
+
+    expect(payload).toMatchObject({
+      attempt: 1,
+      betaCount: 1,
+      betaFlags: ['beta-a'],
+      model: 'claude-test',
+      rawRequestParams: requestParams,
+    })
+    expect(requestParams).not.toHaveProperty('rawRequestParams')
+
+    const redactedPayload = redactTracePayload(payload, 'full')
+    const serializedRedactedPayload = JSON.stringify(redactedPayload)
+
+    expect(serializedRedactedPayload).toContain('"rawRequestParams"')
+    expect(serializedRedactedPayload).toContain('full trace prompt content')
+    expect(serializedRedactedPayload).not.toContain('request-secret')
+    expect(serializedRedactedPayload).not.toContain('sk-request-secret')
+    expect(serializedRedactedPayload).toContain('[REDACTED]')
   })
 
   test('full-mode stream payloads include a redacted raw event copy', () => {
