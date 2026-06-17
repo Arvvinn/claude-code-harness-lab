@@ -725,6 +725,48 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     ])
   })
 
+  test('withRetry still triggers fallback when retry trace observer throws', async () => {
+    const overloadedError = new APIError(
+      529,
+      { error: { type: 'overloaded_error' }, message: 'overloaded' },
+      undefined,
+      new Headers([['request-id', 'req-fallback-observer']]),
+      'overloaded_error',
+    )
+    const originalFallbackEnv = process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS
+    process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS = '1'
+
+    try {
+      const generator = withRetry(
+        async () => ({}) as never,
+        async () => {
+          throw overloadedError
+        },
+        {
+          fallbackModel: 'claude-sonnet-fallback',
+          model: 'claude-opus-primary',
+          onRetryTrace: () => {
+            throw new Error('trace observer failed')
+          },
+          provider: 'firstParty',
+          thinkingConfig: { type: 'disabled' },
+        },
+      )
+
+      await expect(generator.next()).resolves.toMatchObject({ done: false })
+      await expect(generator.next()).resolves.toMatchObject({ done: false })
+      await expect(generator.next()).rejects.toBeInstanceOf(
+        FallbackTriggeredError,
+      )
+    } finally {
+      if (originalFallbackEnv === undefined) {
+        delete process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS
+      } else {
+        process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS = originalFallbackEnv
+      }
+    }
+  })
+
   test('withRetry exposes max-token retry metadata when it shrinks the next attempt budget', async () => {
     const traceEvents: unknown[] = []
     const overflowError = new APIError(
@@ -780,6 +822,49 @@ describe('claude API trace instrumentation behavior boundaries', () => {
         retryType: 'max_tokens_retry_triggered',
         status: 400,
       },
+    ])
+  })
+
+  test('withRetry still retries max-token overflow when retry trace observer throws', async () => {
+    const overflowError = new APIError(
+      400,
+      {
+        error: { type: 'invalid_request_error' },
+        message:
+          'input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000',
+      },
+      undefined,
+      new Headers([['request-id', 'req-overflow-observer']]),
+      'invalid_request_error',
+    )
+    const contexts: Array<{ maxTokensOverride?: number }> = []
+
+    const generator = withRetry(
+      async () => ({}) as never,
+      async (_client, attempt, context) => {
+        contexts.push({ maxTokensOverride: context.maxTokensOverride })
+        if (attempt === 1) {
+          throw overflowError
+        }
+        return 'ok'
+      },
+      {
+        model: 'claude-test',
+        onRetryTrace: () => {
+          throw new Error('trace observer failed')
+        },
+        provider: 'firstParty',
+        thinkingConfig: { type: 'disabled' },
+      },
+    )
+
+    await expect(generator.next()).resolves.toEqual({
+      done: true,
+      value: 'ok',
+    })
+    expect(contexts).toEqual([
+      { maxTokensOverride: undefined },
+      { maxTokensOverride: 10941 },
     ])
   })
 })

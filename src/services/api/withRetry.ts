@@ -182,6 +182,19 @@ export class FallbackTriggeredError extends Error {
   }
 }
 
+function emitRetryTraceSafely(
+  onRetryTrace: RetryOptions['onRetryTrace'],
+  event: APIRetryTraceDetails,
+): void {
+  try {
+    onRetryTrace?.(event)
+  } catch (error) {
+    logForDebugging(`API retry trace observer failed: ${errorMessage(error)}`, {
+      level: 'error',
+    })
+  }
+}
+
 export async function* withRetry<T>(
   getClient: () => Promise<Anthropic>,
   operation: (
@@ -358,7 +371,7 @@ export async function* withRetry<T>(
               provider: getAPIProviderForStatsig(),
             })
 
-            options.onRetryTrace?.({
+            emitRetryTraceSafely(options.onRetryTrace, {
               attempt,
               fallbackModel: options.fallbackModel,
               maxRetries,
@@ -447,7 +460,7 @@ export async function* withRetry<T>(
             attempt,
           })
 
-          options.onRetryTrace?.({
+          emitRetryTraceSafely(options.onRetryTrace, {
             adjustedMaxTokens,
             attempt,
             contextLimit,
