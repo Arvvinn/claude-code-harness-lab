@@ -463,9 +463,9 @@ function buildAPIRetryTracePayload(
         ? message.error.name
         : getStringFieldForTrace(errorRecord?.name),
     requestId:
-      input.requestId ??
       apiError?.requestID ??
-      getStringFieldForTrace(errorRecord?.requestID),
+      getStringFieldForTrace(errorRecord?.requestID) ??
+      input.requestId,
     clientRequestId: input.clientRequestId,
   })
 }
@@ -1381,22 +1381,22 @@ export async function runNonStreamingRequestAttempt(
   captureRequest(retryParams)
   onAttempt(input.attempt, start, retryParams.max_tokens)
 
+  const adjustedParams = adjustParamsForNonStreaming(
+    retryParams,
+    MAX_NON_STREAMING_TOKENS,
+  )
+
   if (emitTraceEvent !== undefined) {
     emitTraceEvent({
       source: 'api',
       type: 'api.request_built',
       payload: buildAPIRequestTracePayload(
-        retryParams,
+        adjustedParams,
         input,
         input.traceMode ?? 'learn',
       ),
     })
   }
-
-  const adjustedParams = adjustParamsForNonStreaming(
-    retryParams,
-    MAX_NON_STREAMING_TOKENS,
-  )
 
   return await requestExecutor(adjustedParams)
 }

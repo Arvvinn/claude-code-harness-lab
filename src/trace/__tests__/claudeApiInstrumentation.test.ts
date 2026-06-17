@@ -21,6 +21,7 @@ mock.module('bun:bundle', () => ({
 }))
 
 const {
+  MAX_NON_STREAMING_TOKENS,
   claudeApiTraceInternals,
   runNonStreamingRequestAttempt,
   yieldNonStreamingRetryMessages,
@@ -216,6 +217,83 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     expect(JSON.stringify(traceEvents[0].payload)).not.toContain('secret-token')
   })
 
+  test('fallback request_built full payload reflects non-streaming adjusted params sent to the SDK', async () => {
+    const traceEvents: Array<{
+      type: string
+      payload: Record<string, unknown>
+    }> = []
+    const requestParams = {
+      model: 'claude-test',
+      max_tokens: MAX_NON_STREAMING_TOKENS + 100,
+      thinking: {
+        type: 'enabled',
+        budget_tokens: MAX_NON_STREAMING_TOKENS + 50,
+      },
+      messages: [{ role: 'user', content: 'large fallback request' }],
+    } as unknown as BetaMessageStreamParams
+
+    await runNonStreamingRequestAttempt(
+      {
+        attempt: 1,
+        provider: 'firstParty',
+        querySource: 'sdk',
+        traceMode: 'full',
+      },
+      {} as never,
+      () => requestParams,
+      (_attempt, _startTime, maxTokens) => {
+        expect(maxTokens).toBe(MAX_NON_STREAMING_TOKENS + 100)
+      },
+      params => {
+        expect(params).toBe(requestParams)
+      },
+      async adjustedParams => {
+        expect(adjustedParams.max_tokens).toBe(MAX_NON_STREAMING_TOKENS)
+        expect(adjustedParams.thinking).toMatchObject({
+          type: 'enabled',
+          budget_tokens: MAX_NON_STREAMING_TOKENS - 1,
+        })
+
+        return {
+          id: 'msg_nonstreaming_adjusted',
+          model: 'claude-test',
+          role: 'assistant',
+          type: 'message',
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+          content: [],
+        } as unknown as BetaMessage
+      },
+      event => {
+        traceEvents.push(event)
+      },
+    )
+
+    expect(traceEvents).toHaveLength(1)
+    expect(traceEvents[0]).toMatchObject({
+      type: 'api.request_built',
+      payload: {
+        maxTokens: MAX_NON_STREAMING_TOKENS,
+        rawRequestParams: {
+          max_tokens: MAX_NON_STREAMING_TOKENS,
+          thinking: {
+            type: 'enabled',
+            budget_tokens: MAX_NON_STREAMING_TOKENS - 1,
+          },
+        },
+      },
+    })
+    expect(
+      (requestParams as unknown as { max_tokens: number }).max_tokens,
+    ).toBe(MAX_NON_STREAMING_TOKENS + 100)
+  })
+
   test('emits api.retry when fallback retry messages are yielded', async () => {
     const traceEvents: Array<{
       type: string
@@ -232,7 +310,7 @@ describe('claude API trace instrumentation behavior boundaries', () => {
       error: {
         name: 'APIError',
         status: 529,
-        requestID: 'req_retry',
+        requestID: 'req_current_retry',
       },
       retryAttempt: 2,
       retryInMs: 250,
@@ -270,7 +348,7 @@ describe('claude API trace instrumentation behavior boundaries', () => {
         clientRequestId: 'client-1',
         model: 'claude-test',
         provider: 'firstParty',
-        requestId: 'req_retry',
+        requestId: 'req_originating_stream',
       },
       event => {
         traceEvents.push(event)
@@ -292,7 +370,7 @@ describe('claude API trace instrumentation behavior boundaries', () => {
         maxRetries: 5,
         model: 'claude-test',
         provider: 'firstParty',
-        requestId: 'req_retry',
+        requestId: 'req_current_retry',
         retryInMs: 250,
         status: 529,
       },
