@@ -282,7 +282,7 @@ function buildAPIRequestTracePayload(
     provider: string
     querySource?: QuerySource
   },
-  mode: ActiveTraceMode = 'learn',
+  _mode: ActiveTraceMode = 'learn',
 ): Record<string, unknown> {
   const request = params as Record<string, unknown>
   const outputConfig = getObjectFieldForTrace(request.output_config)
@@ -310,14 +310,10 @@ function buildAPIRequestTracePayload(
     previousRequestId: input.previousRequestId,
   })
 
-  if (mode === 'full') {
-    return {
-      ...payload,
-      rawRequestParams: params,
-    }
+  return {
+    ...payload,
+    rawRequestParams: params,
   }
-
-  return payload
 }
 
 function buildAPIStreamEventTracePayload(

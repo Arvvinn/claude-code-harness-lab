@@ -174,6 +174,7 @@ function emitToolOrchestrationTrace(
     payload: {
       toolUseId: toolUse.id,
       toolName: toolUse.name,
+      toolInput: toolUse.input,
       ...payload,
     },
   })

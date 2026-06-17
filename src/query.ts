@@ -307,6 +307,41 @@ function getTraceMessageTypeCount(
   return messages.filter(message => message.type === type).length
 }
 
+function buildTraceStudyContext(input: {
+  messages: Message[]
+  systemPrompt: SystemPrompt
+  userContext: { [k: string]: string }
+  systemContext: { [k: string]: string }
+}): Record<string, unknown> {
+  return {
+    messages: input.messages.map(message => snapshotTraceMessage(message)),
+    systemPrompt: input.systemPrompt,
+    userContext: input.userContext,
+    systemContext: input.systemContext,
+  }
+}
+
+function snapshotTraceMessage(message: Message): Record<string, unknown> {
+  const source = message as unknown as Record<string, unknown>
+  const snapshot: Record<string, unknown> = {}
+
+  for (const key of Reflect.ownKeys(message)) {
+    if (typeof key === 'string') {
+      snapshot[key] = source[key]
+    }
+  }
+
+  snapshot.type = message.type
+  snapshot.uuid = source.uuid
+  snapshot.timestamp = source.timestamp
+
+  if ('message' in source) {
+    snapshot.message = source.message
+  }
+
+  return snapshot
+}
+
 export type QueryParams = {
   messages: Message[]
   systemPrompt: SystemPrompt
@@ -394,10 +429,17 @@ export async function* query(
   // inside the HARNESS_TRACE guard; when the feature is off it remains unset.
   let harnessTraceOwner: { turnId: string; startedAt: number } | undefined
   let harnessTraceLoopMetadata: HarnessTraceQueryLoopMetadata | undefined
+  let harnessTraceStudyContext: Record<string, unknown> | undefined
   let harnessTraceReturnedTerminal: Terminal | undefined
   if (feature('HARNESS_TRACE')) {
     let traceTurnId = params.traceTurnId
     if (isTraceSessionActive()) {
+      harnessTraceStudyContext = buildTraceStudyContext({
+        messages: params.messages,
+        systemPrompt: params.systemPrompt,
+        userContext: params.userContext,
+        systemContext: params.systemContext,
+      })
       if (traceTurnId === undefined) {
         traceTurnId = randomUUID()
         harnessTraceOwner = {
@@ -427,6 +469,7 @@ export async function* query(
             querySource: params.querySource,
             isNonInteractiveSession,
             hasAgent,
+            ...harnessTraceStudyContext,
           },
         })
         emitTrace({
@@ -442,6 +485,7 @@ export async function* query(
             querySource: params.querySource,
             isNonInteractiveSession,
             hasAgent,
+            ...harnessTraceStudyContext,
           },
         })
       }
@@ -487,6 +531,7 @@ export async function* query(
         consumedCommandUuids,
         consumedAutonomyCommands,
         harnessTraceLoopMetadata,
+        harnessTraceStudyContext,
       )
       const countTraceResult = (
         result: IteratorResult<QueryYield, Terminal>,
@@ -535,6 +580,7 @@ export async function* query(
         consumedCommandUuids,
         consumedAutonomyCommands,
         harnessTraceLoopMetadata,
+        harnessTraceStudyContext,
       )
     }
   } catch (error) {
@@ -648,6 +694,7 @@ async function* queryLoop(
   consumedCommandUuids: string[],
   consumedAutonomyCommands: QueuedCommand[],
   harnessTraceLoopMetadata?: HarnessTraceQueryLoopMetadata,
+  harnessTraceStudyContext?: Record<string, unknown>,
 ): AsyncGenerator<QueryYield, Terminal> {
   // Immutable params — never reassigned during the query loop.
   const {
@@ -737,6 +784,14 @@ async function* queryLoop(
 
     if (feature('HARNESS_TRACE')) {
       harnessTraceLoopIndex = (harnessTraceLoopIndex ?? 0) + 1
+      const studyContext =
+        harnessTraceStudyContext ??
+        buildTraceStudyContext({
+          messages,
+          systemPrompt,
+          userContext,
+          systemContext,
+        })
       harnessTraceLoop = {
         index: harnessTraceLoopIndex,
         startedAt: Date.now(),
@@ -754,6 +809,7 @@ async function* queryLoop(
           turnCount,
           transitionReason: state.transition?.reason ?? null,
           hasAgent: Boolean(toolUseContext.agentId),
+          ...studyContext,
         },
       })
     }

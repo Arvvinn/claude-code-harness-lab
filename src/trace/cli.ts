@@ -6,12 +6,8 @@ import {
   getTraceEventsPath,
   getTraceRootDir,
 } from './paths.js'
-import {
-  formatTraceRecord,
-  parseTraceJsonLine,
-  type TraceDisplayMode,
-  type TraceDisplayRecord,
-} from './format.js'
+import { parseTraceJsonLine, type TraceDisplayRecord } from './format.js'
+import { formatTracePanel } from './panel.js'
 import { TRACE_TAIL_COMMAND } from './liveWindow.js'
 import { clearActiveTraceSession, readActiveTraceSession } from './store.js'
 import type { TraceMode } from './types.js'
@@ -46,7 +42,7 @@ interface TraceSessionListing {
 }
 
 const USAGE =
-  'Usage: claude trace status|off|learn|full|list|tail|replay <sessionId>|inspect <sessionId>'
+  'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--raw]|replay <sessionId> [--raw]|inspect <sessionId>'
 
 export async function traceMain(
   args: string[],
@@ -72,7 +68,13 @@ export async function traceMain(
         writeText(io.stdout, getListText())
         return 0
       case 'replay':
-        writeText(io.stdout, getReplayText(requireSessionId(args[1], 'replay')))
+        writeText(
+          io.stdout,
+          getReplayText(
+            requireSessionId(getFirstNonFlagArg(args.slice(1)), 'replay'),
+            hasRawFlag(args),
+          ),
+        )
         return 0
       case 'inspect':
         writeText(
@@ -81,7 +83,12 @@ export async function traceMain(
         )
         return 0
       case 'tail':
-        await writeTail(args[1], io, options.tail)
+        await writeTail(
+          getFirstNonFlagArg(args.slice(1)),
+          io,
+          options.tail,
+          hasRawFlag(args),
+        )
         return 0
       case '-h':
       case '--help':
@@ -253,18 +260,24 @@ function listTraceSessions(): TraceSessionListing[] {
   )
 }
 
-function getReplayText(sessionId: string): string {
+function getReplayText(sessionId: string, raw: boolean): string {
+  if (raw) {
+    const lines = readNonEmptyLines(getTraceEventsPath(sessionId))
+
+    if (lines.length === 0) {
+      return `No events found for session ${sessionId}\n`
+    }
+
+    return `${lines.join('\n')}\n`
+  }
+
   const records = readTraceRecords(sessionId)
 
   if (records.length === 0) {
     return `No events found for session ${sessionId}\n`
   }
 
-  const displayMode = getDisplayMode(loadTraceConfig().mode)
-
-  return `${records
-    .map(record => formatTraceRecord(record, displayMode))
-    .join('\n')}\n`
+  return formatTracePanel(records, { title: 'Agent Loop Replay' })
 }
 
 function getInspectText(sessionId: string): string {
@@ -297,6 +310,7 @@ async function writeTail(
   requestedSessionId: string | undefined,
   io: TraceIo,
   options: TraceTailOptions = {},
+  raw = false,
 ): Promise<void> {
   const target = getTailTarget(requestedSessionId)
 
@@ -316,11 +330,11 @@ async function writeTail(
     return
   }
 
-  const displayMode = getDisplayMode(loadTraceConfig().mode)
   const follow = options.follow ?? true
   const pollIntervalMs = options.pollIntervalMs ?? 500
   let processedLineCount = 0
   let idleStartedAt = Date.now()
+  const records: TraceDisplayRecord[] = []
 
   for (;;) {
     const lines = readNonEmptyLines(target.eventsPath)
@@ -331,15 +345,29 @@ async function writeTail(
 
     if (lines.length < processedLineCount) {
       processedLineCount = 0
+      records.length = 0
     }
 
     if (newLines.length > 0) {
-      for (let index = 0; index < newLines.length; index += 1) {
-        const record = parseTraceJsonLine(newLines[index]!, {
-          sessionId: target.sessionId,
-          lineNumber: processedLineCount + index + 1,
-        })
-        writeText(io.stdout, `${formatTraceRecord(record, displayMode)}\n`)
+      if (raw) {
+        for (const line of newLines) {
+          writeText(io.stdout, `${line}\n`)
+        }
+      } else {
+        for (let index = 0; index < newLines.length; index += 1) {
+          const record = parseTraceJsonLine(newLines[index]!, {
+            sessionId: target.sessionId,
+            lineNumber: processedLineCount + index + 1,
+          })
+          records.push(record)
+        }
+
+        writeText(
+          io.stdout,
+          `${follow ? '\x1b[2J\x1b[H' : ''}${formatTracePanel(records, {
+            title: 'Agent Loop Live',
+          })}`,
+        )
       }
 
       processedLineCount = lines.length
@@ -385,14 +413,13 @@ function getTailTarget(requestedSessionId: string | undefined): {
 }
 
 function readNonEmptyLines(path: string): string[] {
+  if (!existsSync(path)) {
+    return []
+  }
+
   return readFileSync(path, 'utf8')
     .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(line => line.length > 0)
-}
-
-function getDisplayMode(mode: TraceMode): TraceDisplayMode {
-  return mode === 'full' ? 'full' : 'learn'
+    .filter(line => line.trim().length > 0)
 }
 
 function getLastTimestamp(records: TraceDisplayRecord[]): string | null {
@@ -418,6 +445,14 @@ function requireSessionId(
   getTraceEventsPath(sessionId)
 
   return sessionId
+}
+
+function hasRawFlag(args: string[]): boolean {
+  return args.includes('--raw')
+}
+
+function getFirstNonFlagArg(args: string[]): string | undefined {
+  return args.find(arg => !arg.startsWith('-'))
 }
 
 function writeText(output: WritableOutput, text: string): void {

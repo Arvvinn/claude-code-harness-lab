@@ -107,12 +107,11 @@ describe('redactTracePayload', () => {
     })
   })
 
-  test('keeps learner payloads short', () => {
+  test('preserves long learner strings for local study traces', () => {
     const value = `${'x'.repeat(500)}tail`
     const result = redactTracePayload({ text: value }, 'learn')
 
-    expect((result as { text: string }).text).toHaveLength(500)
-    expect((result as { text: string }).text).toBe('x'.repeat(500))
+    expect((result as { text: string }).text).toBe(value)
   })
 
   test('redacts bearer and basic strings under generic keys', () => {
@@ -155,12 +154,11 @@ describe('redactTracePayload', () => {
     })
   })
 
-  test('caps full payload strings', () => {
+  test('preserves long full payload strings for local study traces', () => {
     const value = `${'x'.repeat(20000)}tail`
     const result = redactTracePayload({ text: value }, 'full')
 
-    expect((result as { text: string }).text).toHaveLength(20000)
-    expect((result as { text: string }).text).toBe('x'.repeat(20000))
+    expect((result as { text: string }).text).toBe(value)
   })
 
   test('does not mutate source objects', () => {
@@ -171,7 +169,7 @@ describe('redactTracePayload', () => {
 
     expect(redactTracePayload(payload, 'learn')).toEqual({
       token: '[REDACTED]',
-      nested: { text: 'x'.repeat(500) },
+      nested: { text: `${'x'.repeat(500)}tail` },
     })
     expect(payload).toEqual({
       token: 'secret-token',

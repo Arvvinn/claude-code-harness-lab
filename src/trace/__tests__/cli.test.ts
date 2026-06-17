@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
@@ -100,14 +100,70 @@ describe('trace CLI', () => {
     )
   })
 
-  test('replay prints formatted event streams using the current display mode', async () => {
+  test('replay prints an agent loop panel by default', async () => {
     saveTraceConfig({ mode: 'learn', autoTailWindow: true })
     appendTraceEvent(
       makeTraceEvent({
         type: 'turn.start',
+        source: 'query',
         payload: {
           inputChars: 41,
-          rawPrompt: 'hidden raw prompt',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'explain the project' },
+            },
+          ],
+          systemPrompt: [{ type: 'text', text: 'system prompt body' }],
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-2',
+        sequence: 2,
+        type: 'api.request_built',
+        source: 'api',
+        payload: {
+          model: 'claude-test',
+          provider: 'firstParty',
+          messageCount: 1,
+          toolCount: 1,
+          rawRequestParams: {
+            system: 'raw system prompt should stay out of panel',
+            messages: [
+              {
+                role: 'user',
+                content: 'raw request message should stay out of panel',
+              },
+            ],
+          },
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-3',
+        sequence: 3,
+        type: 'tool.detected',
+        source: 'tool',
+        payload: {
+          toolName: 'Read',
+          toolUseId: 'toolu_1',
+          toolInput: { file_path: 'README.md' },
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-4',
+        sequence: 4,
+        type: 'query.loop_end',
+        source: 'query',
+        payload: {
+          stopReason: 'next_turn',
+          toolUseCount: 1,
+          toolResultCount: 0,
         },
       }),
     )
@@ -115,8 +171,125 @@ describe('trace CLI', () => {
     const result = await runTrace(['replay', 'session-1'])
 
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain('14:03:10 turn.start inputChars=41')
-    expect(result.stdout).not.toContain('hidden raw prompt')
+    expect(result.stdout).toContain('Agent Loop Replay')
+    expect(result.stdout).toContain(
+      'User -> messages[] -> LLM -> stop_reason/tool_use decision -> tools -> append results -> loop back/return text',
+    )
+    expect(result.stdout).toContain('\x1b[36m[USER]\x1b[0m')
+    expect(result.stdout).toContain('[USER]')
+    expect(result.stdout).toContain('explain the project')
+    expect(result.stdout).toContain('[SYSTEM]')
+    expect(result.stdout).toContain('system prompt body')
+    expect(result.stdout).toContain('[LLM]')
+    expect(result.stdout).toContain('claude-test')
+    expect(result.stdout).not.toContain('rawRequestParams')
+    expect(result.stdout).not.toContain(
+      'raw system prompt should stay out of panel',
+    )
+    expect(result.stdout).not.toContain(
+      'raw request message should stay out of panel',
+    )
+    expect(result.stdout).toContain('[TOOL]')
+    expect(result.stdout).toContain('Read')
+    expect(result.stdout).not.toContain('14:03:10 turn.start')
+  })
+
+  test('replay --raw prints raw JSONL events', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        payload: {
+          inputChars: 41,
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'raw prompt is visible in raw mode' },
+            },
+          ],
+        },
+      }),
+    )
+    const manuallyFormattedLine =
+      '  {"eventId":"manual-event","sessionId":"session-1","sequence":2,"timestamp":"2026-06-16T14:03:11.000Z","mode":"learn","source":"api","type":"api.request_built","payload":{"model":"claude-manual"}}  '
+    const malformedLine = 'this is not valid JSONL but raw mode preserves it'
+    await appendFile(
+      getTraceEventsPath('session-1'),
+      `${manuallyFormattedLine}\n${malformedLine}\n`,
+    )
+
+    const result = await runTrace(['replay', 'session-1', '--raw'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('"type":"turn.start"')
+    expect(result.stdout).toContain('raw prompt is visible in raw mode')
+    expect(result.stdout.split('\n')).toContain(manuallyFormattedLine)
+    expect(result.stdout.split('\n')).toContain(malformedLine)
+    expect(result.stdout).not.toContain('trace.read_error')
+  })
+
+  test('tail prints a refreshing agent loop panel by default', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'tail the live agent loop' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(['tail', 'session-1'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Agent Loop Live')
+    expect(result.stdout).toContain('[USER]')
+    expect(result.stdout).toContain('tail the live agent loop')
+    expect(result.stdout).toContain(
+      'User -> messages[] -> LLM -> stop_reason/tool_use decision -> tools -> append results -> loop back/return text',
+    )
+    expect(result.stdout).not.toContain('"type":"turn.start"')
+  })
+
+  test('tail --raw keeps streaming raw JSONL display', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'raw tail prompt' },
+            },
+          ],
+        },
+      }),
+    )
+    const manuallyFormattedLine =
+      '  {"eventId":"manual-tail-event","sessionId":"session-1","sequence":2,"timestamp":"2026-06-16T14:03:11.000Z","mode":"learn","source":"api","type":"api.request_built","payload":{"model":"claude-tail-manual"}}  '
+    const malformedLine = 'tail raw malformed line stays raw'
+    await appendFile(
+      getTraceEventsPath('session-1'),
+      `${manuallyFormattedLine}\n${malformedLine}\n`,
+    )
+
+    const result = await runTrace(['tail', 'session-1', '--raw'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('"type":"turn.start"')
+    expect(result.stdout).toContain('raw tail prompt')
+    expect(result.stdout.split('\n')).toContain(manuallyFormattedLine)
+    expect(result.stdout.split('\n')).toContain(malformedLine)
+    expect(result.stdout).not.toContain('trace.read_error')
+    expect(result.stdout).not.toContain('Agent Loop Live')
   })
 
   test('inspect prints a JSON summary with counts by type and source', async () => {
