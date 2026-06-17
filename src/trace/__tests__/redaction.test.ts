@@ -54,6 +54,9 @@ describe('redactTracePayload', () => {
           refresh_token: 'refresh-token',
           id_token: 'id-token',
           authToken: 'auth-token',
+          oauthToken: 'oauth-token',
+          sessionToken: 'session-token',
+          'device-token': 'device-token',
         },
         'full',
       ),
@@ -63,6 +66,9 @@ describe('redactTracePayload', () => {
       refresh_token: '[REDACTED]',
       id_token: '[REDACTED]',
       authToken: '[REDACTED]',
+      oauthToken: '[REDACTED]',
+      sessionToken: '[REDACTED]',
+      'device-token': '[REDACTED]',
     })
   })
 

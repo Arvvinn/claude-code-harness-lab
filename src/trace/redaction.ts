@@ -12,6 +12,16 @@ const SECRET_TOKEN_KEYS = new Set([
   'idtoken',
   'authtoken',
 ])
+const TOKEN_METRIC_KEYS = new Set([
+  'inputtokens',
+  'outputtokens',
+  'maxtokens',
+  'adjustedmaxtokens',
+  'cachecreationinputtokens',
+  'cachereadinputtokens',
+  'tokencount',
+  'tokens',
+])
 const AUTH_VALUE_PATTERN = /^(bearer|basic)\s+\S+/i
 
 type ObjectFrame = {
@@ -121,8 +131,16 @@ function prepareValue(
 }
 
 function shouldRedactKey(key: string): boolean {
+  const normalizedKey = normalizeKey(key)
+
+  if (TOKEN_METRIC_KEYS.has(normalizedKey)) {
+    return false
+  }
+
   return (
-    SECRET_KEY_PATTERN.test(key) || SECRET_TOKEN_KEYS.has(normalizeKey(key))
+    SECRET_KEY_PATTERN.test(key) ||
+    SECRET_TOKEN_KEYS.has(normalizedKey) ||
+    normalizedKey.endsWith('token')
   )
 }
 
