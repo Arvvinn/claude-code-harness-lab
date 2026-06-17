@@ -143,6 +143,20 @@ export class StreamingToolExecutor {
     }
     const toolDefinition = findToolByName(this.toolDefinitions, block.name)
     if (!toolDefinition) {
+      if (feature('HARNESS_TRACE')) {
+        this.emitToolTrace(
+          assistantMessage,
+          block.id,
+          block.name,
+          'tool.error',
+          {
+            errorName: 'UnknownToolError',
+            message: `No such tool available: ${block.name}`,
+            classification: 'unknown_tool',
+            durationMs: 0,
+          },
+        )
+      }
       this.tools.push({
         id: block.id,
         block,
@@ -601,7 +615,7 @@ export class StreamingToolExecutor {
     assistantMessage: AssistantMessage,
     toolUseId: string,
     toolName: string,
-    type: 'tool.detected' | 'tool.queued' | 'tool.cancelled',
+    type: 'tool.detected' | 'tool.queued' | 'tool.error' | 'tool.cancelled',
     payload: Record<string, unknown>,
   ): void {
     emitTrace({

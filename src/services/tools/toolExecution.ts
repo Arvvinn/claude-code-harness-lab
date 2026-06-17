@@ -383,6 +383,7 @@ type ToolTraceErrorClassification =
   | 'sibling_error'
   | 'streaming_fallback'
   | 'tool_call_error'
+  | 'unknown_tool'
   | 'hook_error'
 
 function emitToolLifecycleTrace(
@@ -617,6 +618,21 @@ export async function* runToolUse(
       }),
       ...mcpToolDetailsForAnalytics(toolName, mcpServerType, mcpServerBaseUrl),
     })
+    if (feature('HARNESS_TRACE')) {
+      emitToolLifecycleTrace(
+        traceMetadata,
+        assistantMessage,
+        'tool.error',
+        toolName,
+        toolUse.id,
+        buildToolErrorTracePayload({
+          errorName: 'UnknownToolError',
+          message: `No such tool available: ${toolName}`,
+          classification: 'unknown_tool',
+          durationMs: 0,
+        }),
+      )
+    }
     yield {
       message: createUserMessage({
         content: [

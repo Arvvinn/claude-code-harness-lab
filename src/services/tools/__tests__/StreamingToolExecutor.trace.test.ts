@@ -220,6 +220,55 @@ describe('StreamingToolExecutor trace instrumentation', () => {
       }
     })
 
+    test('emits tool.error for streaming unknown tool failures', async () => {
+      const knownTool = makeToolDefinition()
+      const ctx = makeToolUseContext([knownTool])
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-stream-unknown',
+      )
+      const executor = new StreamingToolExecutor(
+        [knownTool],
+        async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
+        ctx,
+        { turnId: 'turn-stream-unknown' },
+      )
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      executor.addTool(
+        makeToolUseBlock('toolu_stream_unknown_1', 'MissingStreamTool'),
+        assistantMessage,
+      )
+      for await (const _update of executor.getRemainingResults()) {
+        // Drain executor
+      }
+      await flushTraceForTesting()
+
+      const events = getNonSessionEvents()
+      expect(events.map(event => event.type)).toEqual([
+        'tool.detected',
+        'tool.error',
+      ])
+      expect(events[1]).toEqual(
+        expect.objectContaining({
+          type: 'tool.error',
+          turnId: 'turn-stream-unknown',
+          parentId: assistantMessage.message.id,
+          payload: expect.objectContaining({
+            toolName: 'MissingStreamTool',
+            toolUseId: 'toolu_stream_unknown_1',
+            classification: 'unknown_tool',
+            errorName: 'UnknownToolError',
+            message: 'No such tool available: MissingStreamTool',
+            durationMs: 0,
+          }),
+        }),
+      )
+    })
+
     test('emits streaming_fallback cancellation with internal turnId on discard', async () => {
       const tool = makeToolDefinition({
         call: async (_input, context) => {

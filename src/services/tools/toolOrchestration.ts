@@ -1,7 +1,9 @@
+import { feature } from 'bun:bundle'
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { findToolByName, type ToolUseContext } from '../../Tool.js'
 import type { AssistantMessage, Message } from '../../types/message.js'
+import { emitTrace } from '../../trace/bus.js'
 import { all } from '../../utils/generators.js'
 import {
   type MessageUpdateLazy,
@@ -41,10 +43,48 @@ export async function* runTools(
     : toolUseContext
 
   let currentContext = contextWithTurn
-  for (const { isConcurrencySafe, blocks } of partitionToolCalls(
-    toolUseMessages,
-    currentContext,
-  )) {
+  const batches = partitionToolCalls(toolUseMessages, currentContext)
+  if (feature('HARNESS_TRACE')) {
+    for (const toolUse of toolUseMessages) {
+      emitToolOrchestrationTrace(
+        traceMetadata,
+        assistantMessages,
+        'tool.detected',
+        toolUse,
+        {
+          status: 'detected',
+          durationMs: 0,
+        },
+      )
+    }
+  }
+
+  const queuedTraceEmitted = new Set<string>()
+  for (const [batchIndex, { isConcurrencySafe, blocks }] of batches.entries()) {
+    if (feature('HARNESS_TRACE')) {
+      if (batchIndex > 0) {
+        for (const block of blocks) {
+          emitQueuedToolTrace(
+            traceMetadata,
+            assistantMessages,
+            queuedTraceEmitted,
+            block,
+            'sibling_completion',
+          )
+        }
+      }
+      if (isConcurrencySafe) {
+        for (const block of blocks.slice(getMaxToolUseConcurrency())) {
+          emitQueuedToolTrace(
+            traceMetadata,
+            assistantMessages,
+            queuedTraceEmitted,
+            block,
+            'execution_slot_unavailable',
+          )
+        }
+      }
+    }
     if (isConcurrencySafe) {
       const queuedContextModifiers: Record<
         string,
@@ -104,6 +144,64 @@ export async function* runTools(
 }
 
 type Batch = { isConcurrencySafe: boolean; blocks: ToolUseBlock[] }
+
+function findAssistantMessageForToolUse(
+  assistantMessages: AssistantMessage[],
+  toolUse: ToolUseBlock,
+): AssistantMessage | undefined {
+  return assistantMessages.find(
+    message =>
+      Array.isArray(message.message.content) &&
+      message.message.content.some(
+        content => content.type === 'tool_use' && content.id === toolUse.id,
+      ),
+  )
+}
+
+function emitToolOrchestrationTrace(
+  traceMetadata: ToolTraceMetadata | undefined,
+  assistantMessages: AssistantMessage[],
+  type: 'tool.detected' | 'tool.queued',
+  toolUse: ToolUseBlock,
+  payload: Record<string, unknown>,
+): void {
+  emitTrace({
+    source: 'tool',
+    type,
+    turnId: traceMetadata?.turnId,
+    parentId: findAssistantMessageForToolUse(assistantMessages, toolUse)
+      ?.message.id as string | undefined,
+    payload: {
+      toolUseId: toolUse.id,
+      toolName: toolUse.name,
+      ...payload,
+    },
+  })
+}
+
+function emitQueuedToolTrace(
+  traceMetadata: ToolTraceMetadata | undefined,
+  assistantMessages: AssistantMessage[],
+  queuedTraceEmitted: Set<string>,
+  toolUse: ToolUseBlock,
+  queueReason: 'sibling_completion' | 'execution_slot_unavailable',
+): void {
+  if (queuedTraceEmitted.has(toolUse.id)) {
+    return
+  }
+  queuedTraceEmitted.add(toolUse.id)
+  emitToolOrchestrationTrace(
+    traceMetadata,
+    assistantMessages,
+    'tool.queued',
+    toolUse,
+    {
+      status: 'queued',
+      queueReason,
+      durationMs: 0,
+    },
+  )
+}
 
 /**
  * Partition tool calls into batches where each batch is either:

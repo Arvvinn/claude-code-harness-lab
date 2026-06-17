@@ -85,6 +85,7 @@ mock.module('src/tools.js', () => ({
 const { runToolUse, toolExecutionTraceInternals } = await import(
   '../toolExecution.js'
 )
+const { runTools } = await import('../toolOrchestration.js')
 const { flushTraceForTesting, resetTraceForTesting, startTraceSession } =
   await import('../../../trace/bus.js')
 const { getTraceConfigPath, getTraceRootDir } = await import(
@@ -165,6 +166,117 @@ describe('runToolUse trace instrumentation', () => {
   })
 
   if (feature('HARNESS_TRACE')) {
+    test('emits detected and queued events for non-streaming serial tool execution', async () => {
+      const firstTool = makeTraceTestTool({
+        name: 'TraceExecTool',
+        call: async () => ({ data: { ok: true } }),
+      })
+      const secondTool = makeTraceTestTool({
+        name: 'TraceSecondTool',
+        call: async () => ({ data: { ok: true } }),
+      })
+      const firstBlock = makeToolUseBlock(
+        'toolu_nonstream_serial_1',
+        'TraceExecTool',
+      )
+      const secondBlock = makeToolUseBlock(
+        'toolu_nonstream_serial_2',
+        'TraceSecondTool',
+      )
+      const toolUseContext = makeToolUseContext([firstTool, secondTool])
+      const assistantMessage = makeAssistantMessageWithToolUses(
+        'assistant-parent-nonstream-serial',
+        [firstBlock, secondBlock],
+      )
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      for await (const _update of runTools(
+        [firstBlock, secondBlock],
+        [assistantMessage],
+        async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
+        toolUseContext,
+        { turnId: 'turn-nonstream-serial' },
+      )) {
+        // Drain generator
+      }
+      await flushTraceForTesting()
+
+      const events = getNonSessionEvents()
+      expect(events.filter(event => event.type === 'tool.detected')).toEqual([
+        expect.objectContaining({
+          turnId: 'turn-nonstream-serial',
+          parentId: assistantMessage.message.id,
+          payload: expect.objectContaining({
+            toolName: 'TraceExecTool',
+            toolUseId: 'toolu_nonstream_serial_1',
+            status: 'detected',
+            durationMs: 0,
+          }),
+        }),
+        expect.objectContaining({
+          turnId: 'turn-nonstream-serial',
+          parentId: assistantMessage.message.id,
+          payload: expect.objectContaining({
+            toolName: 'TraceSecondTool',
+            toolUseId: 'toolu_nonstream_serial_2',
+            status: 'detected',
+            durationMs: 0,
+          }),
+        }),
+      ])
+      expect(events.find(event => event.type === 'tool.queued')).toEqual(
+        expect.objectContaining({
+          turnId: 'turn-nonstream-serial',
+          parentId: assistantMessage.message.id,
+          payload: expect.objectContaining({
+            toolName: 'TraceSecondTool',
+            toolUseId: 'toolu_nonstream_serial_2',
+            status: 'queued',
+            queueReason: 'sibling_completion',
+            durationMs: 0,
+          }),
+        }),
+      )
+    })
+
+    test('emits tool.error for non-streaming unknown tool failures', async () => {
+      const toolUseContext = makeToolUseContext([])
+      const assistantMessage = makeAssistantMessage('assistant-parent-unknown')
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_unknown_1', 'MissingTraceTool'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-unknown' },
+      )
+      await flushTraceForTesting()
+
+      expect(getNonSessionEvents()).toEqual([
+        expect.objectContaining({
+          type: 'tool.error',
+          turnId: 'turn-tool-unknown',
+          parentId: assistantMessage.message.id,
+          payload: expect.objectContaining({
+            toolName: 'MissingTraceTool',
+            toolUseId: 'toolu_trace_unknown_1',
+            classification: 'unknown_tool',
+            errorName: 'UnknownToolError',
+            message: 'No such tool available: MissingTraceTool',
+            durationMs: 0,
+          }),
+        }),
+      ])
+    })
+
     test('emits success lifecycle without exposing traceTurnId to hooks or tool.call', async () => {
       const seenCallContexts: ToolUseContext[] = []
       const tool = makeTraceTestTool({
@@ -637,6 +749,7 @@ function getNonSessionEvents(): TraceEvent[] {
 }
 
 function makeTraceTestTool(input: {
+  name?: string
   call: (
     input: { secret: string },
     context: ToolUseContext,
@@ -647,8 +760,9 @@ function makeTraceTestTool(input: {
   ) => Promise<{ result: false; message: string; errorCode?: string }>
   inputSchema?: z.ZodTypeAny
 }) {
+  const name = input.name ?? 'TraceExecTool'
   return {
-    name: 'TraceExecTool',
+    name,
     inputSchema:
       input.inputSchema ??
       z.object({
@@ -659,7 +773,7 @@ function makeTraceTestTool(input: {
     isReadOnly: () => true,
     prompt: async () => '',
     description: async () => 'Trace execution test tool',
-    userFacingName: () => 'TraceExecTool',
+    userFacingName: () => name,
     toAutoClassifierInput: () => '',
     maxResultSizeChars: Infinity,
     renderToolUseMessage: () => null,
@@ -679,8 +793,11 @@ function makeTraceTestTool(input: {
 }
 
 function makeToolUseContext(
-  tool: ReturnType<typeof makeTraceTestTool>,
+  tool:
+    | ReturnType<typeof makeTraceTestTool>
+    | ReturnType<typeof makeTraceTestTool>[],
 ): ToolUseContext {
+  const tools = Array.isArray(tool) ? tool : [tool]
   let appState = {
     toolPermissionContext: { mode: 'default' },
     fastMode: false,
@@ -698,7 +815,7 @@ function makeToolUseContext(
       commands: [],
       debug: false,
       mainLoopModel: 'test-model',
-      tools: [tool],
+      tools,
       verbose: false,
       thinkingConfig: { type: 'disabled' },
       mcpClients: [],
@@ -726,18 +843,24 @@ function makeToolUseContext(
   } as unknown as ToolUseContext
 }
 
-function makeToolUseBlock(toolUseId: string): ToolUseBlock {
+function makeToolUseBlock(
+  toolUseId: string,
+  toolName = 'TraceExecTool',
+): ToolUseBlock {
   return {
     id: toolUseId,
     type: 'tool_use',
-    name: 'TraceExecTool',
+    name: toolName,
     input: {
       secret: 'model input secret',
     },
   } as ToolUseBlock
 }
 
-function makeAssistantMessage(messageId: string): AssistantMessage {
+function makeAssistantMessageWithToolUses(
+  messageId: string,
+  toolUseBlocks: ToolUseBlock[],
+): AssistantMessage {
   return {
     type: 'assistant',
     uuid: `${messageId}-uuid`,
@@ -756,9 +879,13 @@ function makeAssistantMessage(messageId: string): AssistantMessage {
         cache_creation_input_tokens: 0,
         cache_read_input_tokens: 0,
       },
-      content: [],
+      content: toolUseBlocks,
     },
   } as unknown as AssistantMessage
+}
+
+function makeAssistantMessage(messageId: string): AssistantMessage {
+  return makeAssistantMessageWithToolUses(messageId, [])
 }
 
 async function writeTraceConfig(config: TraceConfig): Promise<void> {
