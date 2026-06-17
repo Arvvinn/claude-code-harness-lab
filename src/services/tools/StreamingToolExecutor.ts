@@ -10,7 +10,7 @@ import { findToolByName, type Tools, type ToolUseContext } from '../../Tool.js'
 import { BASH_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/BashTool/toolName.js'
 import type { AssistantMessage, Message } from '../../types/message.js'
 import { createChildAbortController } from '../../utils/abortController.js'
-import { runToolUse } from './toolExecution.js'
+import { runToolUse, type ToolTraceMetadata } from './toolExecution.js'
 import { createToolBatchSpan, endToolBatchSpan } from '../langfuse/index.js'
 import type { LangfuseSpan } from '../langfuse/index.js'
 import { emitTrace } from '../../trace/bus.js'
@@ -73,6 +73,7 @@ export class StreamingToolExecutor {
     private readonly toolDefinitions: Tools,
     private readonly canUseTool: CanUseToolFn,
     toolUseContext: ToolUseContext,
+    private readonly traceMetadata?: ToolTraceMetadata,
   ) {
     this.toolUseContext = toolUseContext
     this.siblingAbortController = createChildAbortController(
@@ -333,18 +334,6 @@ export class StreamingToolExecutor {
    */
   private async executeTool(tool: TrackedTool): Promise<void> {
     tool.status = 'executing'
-    if (feature('HARNESS_TRACE')) {
-      this.emitToolTrace(
-        tool.assistantMessage,
-        tool.id,
-        tool.block.name,
-        'tool.started',
-        {
-          status: 'started',
-          durationMs: 0,
-        },
-      )
-    }
     this.toolUseContext.setInProgressToolUseIDs(prev =>
       new Set(prev).add(tool.id),
     )
@@ -406,6 +395,7 @@ export class StreamingToolExecutor {
         tool.assistantMessage,
         this.canUseTool,
         { ...this.toolUseContext, abortController: toolAbortController },
+        this.traceMetadata,
       )
 
       // Track if this specific tool has produced an error result.
@@ -611,13 +601,13 @@ export class StreamingToolExecutor {
     assistantMessage: AssistantMessage,
     toolUseId: string,
     toolName: string,
-    type: 'tool.detected' | 'tool.queued' | 'tool.started' | 'tool.cancelled',
+    type: 'tool.detected' | 'tool.queued' | 'tool.cancelled',
     payload: Record<string, unknown>,
   ): void {
     emitTrace({
       source: 'tool',
       type,
-      turnId: this.toolUseContext.traceTurnId,
+      turnId: this.traceMetadata?.turnId,
       parentId: assistantMessage.message.id as string | undefined,
       payload: buildStreamingToolTracePayload(toolUseId, toolName, payload),
     })
@@ -660,6 +650,7 @@ export class StreamingToolExecutor {
       {
         status: 'cancelled',
         reason,
+        classification: reason,
         durationMs: 0,
       },
     )

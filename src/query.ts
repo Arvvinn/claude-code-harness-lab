@@ -450,10 +450,6 @@ export async function* query(
       paramsForQuery = {
         ...paramsWithTrace,
         traceTurnId,
-        toolUseContext: {
-          ...paramsWithTrace.toolUseContext,
-          traceTurnId,
-        },
       }
     }
   }
@@ -1035,6 +1031,7 @@ async function* queryLoop(
             toolUseContext.options.tools,
             canUseTool,
             toolUseContext,
+            { turnId: params.traceTurnId },
           )
         : null
 
@@ -1254,6 +1251,7 @@ async function* queryLoop(
                     toolUseContext.options.tools,
                     canUseTool,
                     toolUseContext,
+                    { turnId: params.traceTurnId },
                   )
                 }
               }
@@ -1456,6 +1454,7 @@ async function* queryLoop(
                   toolUseContext.options.tools,
                   canUseTool,
                   toolUseContext,
+                  { turnId: params.traceTurnId },
                 )
               }
 
@@ -1998,7 +1997,15 @@ async function* queryLoop(
 
       const toolUpdates = streamingToolExecutor
         ? streamingToolExecutor.getRemainingResults()
-        : runTools(toolUseBlocks, assistantMessages, canUseTool, toolUseContext)
+        : runTools(
+            toolUseBlocks,
+            assistantMessages,
+            canUseTool,
+            toolUseContext,
+            {
+              turnId: params.traceTurnId,
+            },
+          )
 
       for await (const update of toolUpdates) {
         if (update.message) {

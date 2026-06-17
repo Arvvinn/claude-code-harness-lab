@@ -279,8 +279,6 @@ export type ToolUseContext = {
     }
   >
   queryTracking?: QueryChainTracking
-  /** Trace-only turn correlation ID for HARNESS_TRACE observer events. */
-  traceTurnId?: string
   /** Callback factory for requesting interactive prompts from the user.
    * Returns a prompt callback bound to the given source name.
    * Only available in interactive (REPL) contexts. */

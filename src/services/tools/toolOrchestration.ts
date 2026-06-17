@@ -3,7 +3,11 @@ import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import { findToolByName, type ToolUseContext } from '../../Tool.js'
 import type { AssistantMessage, Message } from '../../types/message.js'
 import { all } from '../../utils/generators.js'
-import { type MessageUpdateLazy, runToolUse } from './toolExecution.js'
+import {
+  type MessageUpdateLazy,
+  runToolUse,
+  type ToolTraceMetadata,
+} from './toolExecution.js'
 import { createToolBatchSpan, endToolBatchSpan } from '../langfuse/index.js'
 
 function getMaxToolUseConcurrency(): number {
@@ -22,6 +26,7 @@ export async function* runTools(
   assistantMessages: AssistantMessage[],
   canUseTool: CanUseToolFn,
   toolUseContext: ToolUseContext,
+  traceMetadata?: ToolTraceMetadata,
 ): AsyncGenerator<MessageUpdate, void> {
   // Wrap all tool calls in this turn under a single Langfuse turn span
   const turnSpan =
@@ -51,6 +56,7 @@ export async function* runTools(
         assistantMessages,
         canUseTool,
         currentContext,
+        traceMetadata,
       )) {
         if (update.contextModifier) {
           const { toolUseID, modifyContext } = update.contextModifier
@@ -81,6 +87,7 @@ export async function* runTools(
         assistantMessages,
         canUseTool,
         currentContext,
+        traceMetadata,
       )) {
         if (update.newContext) {
           currentContext = update.newContext
@@ -135,6 +142,7 @@ async function* runToolsSerially(
   assistantMessages: AssistantMessage[],
   canUseTool: CanUseToolFn,
   toolUseContext: ToolUseContext,
+  traceMetadata?: ToolTraceMetadata,
 ): AsyncGenerator<MessageUpdate, void> {
   let currentContext = toolUseContext
 
@@ -153,6 +161,7 @@ async function* runToolsSerially(
       )!,
       canUseTool,
       currentContext,
+      traceMetadata,
     )) {
       if (update.contextModifier) {
         currentContext = update.contextModifier.modifyContext(currentContext)
@@ -171,6 +180,7 @@ async function* runToolsConcurrently(
   assistantMessages: AssistantMessage[],
   canUseTool: CanUseToolFn,
   toolUseContext: ToolUseContext,
+  traceMetadata?: ToolTraceMetadata,
 ): AsyncGenerator<MessageUpdateLazy, void> {
   yield* all(
     toolUseMessages.map(async function* (toolUse) {
@@ -188,6 +198,7 @@ async function* runToolsConcurrently(
         )!,
         canUseTool,
         toolUseContext,
+        traceMetadata,
       )
       markToolUseAsComplete(toolUseContext, toolUse.id)
     }),
