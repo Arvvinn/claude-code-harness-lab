@@ -14,6 +14,37 @@ describe('redactTracePayload', () => {
     })
   })
 
+  test('redacts common secret key spelling variants', () => {
+    expect(
+      redactTracePayload(
+        {
+          OPENAI_API_KEY: 'sk-openai',
+          ANTHROPIC_API_KEY: 'sk-anthropic',
+          accessToken: 'access-token',
+          refresh_token: 'refresh-token',
+          client_secret: 'client-secret',
+          'x-api-key': 'x-api-key',
+          nested: {
+            databasePassword: 'password',
+            sessionCookie: 'cookie',
+          },
+        },
+        'full',
+      ),
+    ).toEqual({
+      OPENAI_API_KEY: '[REDACTED]',
+      ANTHROPIC_API_KEY: '[REDACTED]',
+      accessToken: '[REDACTED]',
+      refresh_token: '[REDACTED]',
+      client_secret: '[REDACTED]',
+      'x-api-key': '[REDACTED]',
+      nested: {
+        databasePassword: '[REDACTED]',
+        sessionCookie: '[REDACTED]',
+      },
+    })
+  })
+
   test('keeps learner payloads short', () => {
     const value = `${'x'.repeat(500)}tail`
     const result = redactTracePayload({ text: value }, 'learn')

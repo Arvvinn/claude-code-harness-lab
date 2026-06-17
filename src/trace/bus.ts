@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { loadTraceConfig } from './config.js'
+import {
+  loadTraceConfig,
+  refreshTraceConfigCache,
+  resetTraceConfigCacheForTesting,
+} from './config.js'
 import { getTraceEventsPath } from './paths.js'
 import { redactTracePayload } from './redaction.js'
 import {
@@ -41,6 +45,14 @@ export function getTraceMode(): TraceMode {
   return loadTraceConfig().mode
 }
 
+export function refreshTraceModeFromConfig(): TraceMode {
+  if (disabled) {
+    return 'off'
+  }
+
+  return refreshTraceConfigCache().mode
+}
+
 export function getActiveTraceSessionForProcess(): {
   sessionId: string
   mode: ActiveTraceMode
@@ -65,7 +77,7 @@ export function updateActiveTraceModeFromConfig(): void {
     return
   }
 
-  const mode = getTraceMode()
+  const mode = refreshTraceModeFromConfig()
 
   if (mode === 'off') {
     return
@@ -82,91 +94,103 @@ export function startTraceSession(input: {
   cwd: string
   argv: string[]
 }): void {
-  const mode = getTraceMode()
+  try {
+    const mode = getTraceMode()
 
-  if (mode === 'off') {
-    return
-  }
+    if (mode === 'off') {
+      return
+    }
 
-  const startedAt = new Date().toISOString()
-  activeTrace = {
-    sessionId: input.sessionId,
-    mode,
-  }
-  const sessionStartEvent = buildTraceEvent({
-    source: 'repl',
-    type: 'trace.session_start',
-    payload: {
-      cwd: input.cwd,
-      argv: input.argv,
-    },
-  })
-
-  enqueueTraceWrite(() => {
-    writeActiveTraceSession({
+    const startedAt = new Date().toISOString()
+    activeTrace = {
       sessionId: input.sessionId,
-      eventsPath: getTraceEventsPath(input.sessionId),
-      startedAt,
+      mode,
+    }
+    const sessionStartEvent = buildTraceEvent({
+      source: 'repl',
+      type: 'trace.session_start',
+      payload: {
+        cwd: input.cwd,
+        argv: input.argv,
+      },
     })
-    appendTraceEvent(sessionStartEvent)
-  })
+
+    enqueueTraceWrite(() => {
+      writeActiveTraceSession({
+        sessionId: input.sessionId,
+        eventsPath: getTraceEventsPath(input.sessionId),
+        startedAt,
+      })
+      appendTraceEvent(sessionStartEvent)
+    })
+  } catch {
+    disableTraceFromBuildFailure()
+  }
 }
 
 export function emitTrace(input: EmitTraceInput): void {
-  if (disabled) {
-    return
-  }
+  try {
+    if (disabled) {
+      return
+    }
 
-  if (getTraceMode() === 'off') {
+    if (getTraceMode() === 'off') {
+      enqueueTraceWrite(() => {
+        clearActiveTraceSession()
+      })
+      activeTrace = null
+      return
+    }
+
+    if (activeTrace === null) {
+      return
+    }
+
+    const event = buildTraceEvent(input)
+
     enqueueTraceWrite(() => {
-      clearActiveTraceSession()
+      appendTraceEvent(event)
     })
-    activeTrace = null
-    return
+  } catch {
+    disableTraceFromBuildFailure()
   }
-
-  if (activeTrace === null) {
-    return
-  }
-
-  const event = buildTraceEvent(input)
-
-  enqueueTraceWrite(() => {
-    appendTraceEvent(event)
-  })
 }
 
 export function endTraceSession(payload?: Record<string, unknown>): void {
-  if (activeTrace === null) {
-    return
-  }
+  try {
+    if (activeTrace === null) {
+      return
+    }
 
-  if (disabled) {
-    activeTrace = null
-    return
-  }
+    if (disabled) {
+      activeTrace = null
+      return
+    }
 
-  const mode = getTraceMode()
+    const mode = getTraceMode()
 
-  if (mode === 'off') {
+    if (mode === 'off') {
+      enqueueTraceWrite(() => {
+        clearActiveTraceSession()
+      })
+      activeTrace = null
+      return
+    }
+
+    const event = buildTraceEvent({
+      source: 'repl',
+      type: 'trace.session_end',
+      payload,
+    })
+
     enqueueTraceWrite(() => {
+      appendTraceEvent(event)
       clearActiveTraceSession()
     })
     activeTrace = null
-    return
+  } catch {
+    disableTraceFromBuildFailure()
   }
-
-  const event = buildTraceEvent({
-    source: 'repl',
-    type: 'trace.session_end',
-    payload,
-  })
-
-  enqueueTraceWrite(() => {
-    appendTraceEvent(event)
-    clearActiveTraceSession()
-  })
-  activeTrace = null
 }
 
 export async function flushTraceForTesting(): Promise<void> {
@@ -178,6 +202,7 @@ export function resetTraceForTesting(): void {
   disabled = false
   sequence = 0
   appendQueue = Promise.resolve()
+  resetTraceConfigCacheForTesting()
 }
 
 function enqueueTraceWrite(write: () => void): void {
@@ -193,6 +218,17 @@ function enqueueTraceWrite(write: () => void): void {
       activeTrace = null
     }
   })
+}
+
+function disableTraceFromBuildFailure(): void {
+  disabled = true
+  activeTrace = null
+
+  try {
+    clearActiveTraceSession()
+  } catch {
+    // Trace must never throw into the harness path.
+  }
 }
 
 function buildTraceEvent(input: EmitTraceInput): TraceEvent {

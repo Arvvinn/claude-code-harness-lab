@@ -14,7 +14,29 @@ export const DEFAULT_TRACE_CONFIG = {
   autoTailWindow: true,
 } as const
 
+let cachedTraceConfig: TraceConfig | null = null
+
 export function loadTraceConfig(): TraceConfig {
+  if (cachedTraceConfig !== null) {
+    return { ...cachedTraceConfig }
+  }
+
+  cachedTraceConfig = readTraceConfigFromDisk()
+
+  return { ...cachedTraceConfig }
+}
+
+export function refreshTraceConfigCache(): TraceConfig {
+  cachedTraceConfig = readTraceConfigFromDisk()
+
+  return { ...cachedTraceConfig }
+}
+
+export function resetTraceConfigCacheForTesting(): void {
+  cachedTraceConfig = null
+}
+
+function readTraceConfigFromDisk(): TraceConfig {
   const configPath = getTraceConfigPath()
 
   if (!existsSync(configPath)) {
@@ -44,6 +66,7 @@ export function saveTraceConfig(config: TraceConfig): void {
   mkdirSync(dirname(configPath), { recursive: true })
   writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`)
   renameSync(tempPath, configPath)
+  cachedTraceConfig = { ...config }
 }
 
 function isTraceConfig(value: unknown): value is TraceConfig {

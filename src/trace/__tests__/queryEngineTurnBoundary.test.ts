@@ -51,6 +51,7 @@ if (feature('HARNESS_TRACE')) {
   mock.module('../../utils/queryContext.ts', queryContextMock)
 
   const {
+    getSessionId,
     resetStateForTests,
     setCwdState,
     setOriginalCwd,
@@ -204,6 +205,25 @@ if (feature('HARNESS_TRACE')) {
         finalMessageCount: 0,
       })
       expect(JSON.stringify(boundaryEvents)).not.toContain(rawPrompt)
+    })
+
+    test('starts a fresh persisted learn trace session before first turn event', async () => {
+      const engine = createQueryEngine('test system prompt')
+      const sessionId = getSessionId()
+
+      await expect(engine.submitMessage('hello').next()).rejects.toThrow(
+        'input processing failed for trace boundary test',
+      )
+      await flushTraceForTesting()
+
+      const events = readTraceEvents(sessionId)
+      expect(events.map(event => event.type)).toEqual([
+        'trace.session_start',
+        'turn.start',
+        'turn.end',
+      ])
+      expect(events.every(event => event.sessionId === sessionId)).toBe(true)
+      expect(events[1].turnId).toBe(events[2].turnId)
     })
 
     test('emits turn boundaries when system prompt setup throws before input processing', async () => {

@@ -42,7 +42,11 @@ import type { AgentDefinition } from '@claude-code-best/builtin-tools/tools/Agen
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/SyntheticOutputTool/SyntheticOutputTool.js'
 import type { APIError } from '@anthropic-ai/sdk'
 import type { Message, SystemCompactBoundaryMessage } from './types/message.js'
-import { emitTrace, isTraceSessionActive } from './trace/bus.js'
+import {
+  emitTrace,
+  isTraceSessionActive,
+  startTraceSession,
+} from './trace/bus.js'
 import type { OrphanedPermission } from './types/textInputTypes.js'
 import { createAbortController } from './utils/abortController.js'
 import type { AttributionState } from './utils/commitAttribution.js'
@@ -281,6 +285,14 @@ export class QueryEngine {
 
     try {
       if (feature('HARNESS_TRACE')) {
+        if (!isTraceSessionActive()) {
+          startTraceSession({
+            sessionId: getSessionId(),
+            cwd,
+            argv: process.argv,
+          })
+        }
+
         if (isTraceSessionActive()) {
           traceTurnStarted = true
           traceTurnStartedAt = Date.now()

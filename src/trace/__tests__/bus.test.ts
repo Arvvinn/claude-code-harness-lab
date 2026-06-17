@@ -9,6 +9,7 @@ import {
   flushTraceForTesting,
   getActiveTraceSessionForProcess,
   getTraceMode,
+  refreshTraceModeFromConfig,
   resetTraceForTesting,
   startTraceSession,
   updateActiveTraceModeFromConfig,
@@ -18,6 +19,7 @@ import {
   getTraceEventsPath,
   getTraceRootDir,
 } from '../paths.js'
+import { saveTraceConfig } from '../config.js'
 import { readActiveTraceSession, readTraceEvents } from '../store.js'
 import type { TraceConfig } from '../types.js'
 
@@ -139,6 +141,16 @@ describe('TraceBus', () => {
       Authorization: '[REDACTED]',
       nested: { apiKey: '[REDACTED]', visible: 'kept' },
     })
+  })
+
+  test('uses cached trace mode until explicitly refreshed', async () => {
+    expect(getTraceMode()).toBe('off')
+
+    await writeTraceConfigFile({ mode: 'learn', autoTailWindow: true })
+
+    expect(getTraceMode()).toBe('off')
+    expect(refreshTraceModeFromConfig()).toBe('learn')
+    expect(getTraceMode()).toBe('learn')
   })
 
   test('updates active session mode from config without restarting sequence', async () => {
@@ -291,9 +303,98 @@ describe('TraceBus', () => {
     expect(existsSync(getTraceEventsPath('session-after-failure'))).toBe(false)
     expect(readActiveTraceSession()?.sessionId).toBe('session-fail')
   })
+
+  test('emitTrace disables tracing when payload redaction throws', async () => {
+    await writeTraceConfig({ mode: 'learn', autoTailWindow: true })
+
+    startTraceSession({
+      sessionId: 'session-hostile-emit',
+      cwd: 'C:\\workspace',
+      argv: ['ccb'],
+    })
+    await flushTraceForTesting()
+
+    const payload: Record<string, unknown> = {}
+    Object.defineProperty(payload, 'hostile', {
+      enumerable: true,
+      get() {
+        throw new Error('hostile payload getter')
+      },
+    })
+
+    expect(() =>
+      emitTrace({
+        source: 'query',
+        type: 'query.loop_start',
+        payload,
+      }),
+    ).not.toThrow()
+
+    await flushTraceForTesting()
+
+    expect(getTraceMode()).toBe('off')
+    expect(getActiveTraceSessionForProcess()).toBeNull()
+  })
+
+  test('startTraceSession disables tracing when session payload redaction throws', async () => {
+    await writeTraceConfig({ mode: 'learn', autoTailWindow: true })
+
+    const argv = [] as string[]
+    Object.defineProperty(argv, '0', {
+      enumerable: true,
+      get() {
+        throw new Error('hostile argv getter')
+      },
+    })
+
+    expect(() =>
+      startTraceSession({
+        sessionId: 'session-hostile-start',
+        cwd: 'C:\\workspace',
+        argv,
+      }),
+    ).not.toThrow()
+
+    await flushTraceForTesting()
+
+    expect(getTraceMode()).toBe('off')
+    expect(getActiveTraceSessionForProcess()).toBeNull()
+    expect(existsSync(getTraceEventsPath('session-hostile-start'))).toBe(false)
+  })
+
+  test('endTraceSession disables tracing when end payload redaction throws', async () => {
+    await writeTraceConfig({ mode: 'learn', autoTailWindow: true })
+
+    startTraceSession({
+      sessionId: 'session-hostile-end',
+      cwd: 'C:\\workspace',
+      argv: ['ccb'],
+    })
+    await flushTraceForTesting()
+
+    const payload: Record<string, unknown> = {}
+    Object.defineProperty(payload, 'hostile', {
+      enumerable: true,
+      get() {
+        throw new Error('hostile end getter')
+      },
+    })
+
+    expect(() => endTraceSession(payload)).not.toThrow()
+
+    await flushTraceForTesting()
+
+    expect(getTraceMode()).toBe('off')
+    expect(getActiveTraceSessionForProcess()).toBeNull()
+  })
 })
 
 async function writeTraceConfig(config: TraceConfig): Promise<void> {
+  await mkdir(getTraceRootDir(), { recursive: true })
+  saveTraceConfig(config)
+}
+
+async function writeTraceConfigFile(config: TraceConfig): Promise<void> {
   await mkdir(getTraceRootDir(), { recursive: true })
   await writeFile(getTraceConfigPath(), `${JSON.stringify(config, null, 2)}\n`)
 }

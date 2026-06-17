@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { getTraceRootDir } from '../paths.js'
-import { loadTraceConfig, saveTraceConfig } from '../config.js'
+import {
+  loadTraceConfig,
+  resetTraceConfigCacheForTesting,
+  saveTraceConfig,
+} from '../config.js'
 
 const originalTraceDir = process.env.CLAUDE_CODE_TRACE_DIR
 let traceDir: string
@@ -12,9 +16,12 @@ describe('trace config', () => {
   beforeEach(async () => {
     traceDir = await mkdtemp(join(tmpdir(), 'claude-trace-config-'))
     process.env.CLAUDE_CODE_TRACE_DIR = traceDir
+    resetTraceConfigCacheForTesting()
   })
 
   afterEach(async () => {
+    resetTraceConfigCacheForTesting()
+
     if (originalTraceDir === undefined) {
       delete process.env.CLAUDE_CODE_TRACE_DIR
     } else {

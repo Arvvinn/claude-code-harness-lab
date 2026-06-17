@@ -3,17 +3,8 @@ import type { ActiveTraceMode } from './types.js'
 const REDACTED = '[REDACTED]'
 const CIRCULAR = '[Circular]'
 
-const SECRET_KEYS = new Set([
-  'api_key',
-  'apikey',
-  'authorization',
-  'token',
-  'secret',
-  'password',
-  'cookie',
-  'set-cookie',
-])
-
+const SECRET_KEY_PATTERN =
+  /api[-_]?key|token|secret|password|authorization|cookie|set-cookie/i
 const AUTH_VALUE_PATTERN = /^(bearer|basic)\s+\S+/i
 
 type ObjectFrame = {
@@ -123,7 +114,7 @@ function prepareValue(
 }
 
 function shouldRedactKey(key: string): boolean {
-  return SECRET_KEYS.has(key.toLowerCase())
+  return SECRET_KEY_PATTERN.test(key)
 }
 
 function redactString(value: string, mode: ActiveTraceMode): string {
