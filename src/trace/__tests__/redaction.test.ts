@@ -45,6 +45,62 @@ describe('redactTracePayload', () => {
     })
   })
 
+  test('redacts secret token key variants', () => {
+    expect(
+      redactTracePayload(
+        {
+          token: 'raw-token',
+          accessToken: 'access-token',
+          refresh_token: 'refresh-token',
+          id_token: 'id-token',
+          authToken: 'auth-token',
+        },
+        'full',
+      ),
+    ).toEqual({
+      token: '[REDACTED]',
+      accessToken: '[REDACTED]',
+      refresh_token: '[REDACTED]',
+      id_token: '[REDACTED]',
+      authToken: '[REDACTED]',
+    })
+  })
+
+  test('preserves numeric token metrics', () => {
+    expect(
+      redactTracePayload(
+        {
+          inputTokens: 10,
+          outputTokens: 20,
+          maxTokens: 30,
+          adjustedMaxTokens: 40,
+          cache_creation_input_tokens: 50,
+          cache_read_input_tokens: 60,
+          tokenCount: 70,
+          tokens: 80,
+          nested: {
+            tokenCount: 90,
+            tokens: 100,
+          },
+        },
+        'full',
+      ),
+    ).toEqual({
+      inputTokens: 10,
+      outputTokens: 20,
+      maxTokens: 30,
+      adjustedMaxTokens: 40,
+      cache_creation_input_tokens: 50,
+      cache_read_input_tokens: 60,
+      tokenCount: 70,
+      tokens: 80,
+      nested: {
+        tokenCount: 90,
+        tokens: 100,
+      },
+    })
+  })
+
   test('keeps learner payloads short', () => {
     const value = `${'x'.repeat(500)}tail`
     const result = redactTracePayload({ text: value }, 'learn')

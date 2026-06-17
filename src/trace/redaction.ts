@@ -4,7 +4,14 @@ const REDACTED = '[REDACTED]'
 const CIRCULAR = '[Circular]'
 
 const SECRET_KEY_PATTERN =
-  /api[-_]?key|token|secret|password|authorization|cookie|set-cookie/i
+  /api[-_]?key|secret|password|authorization|cookie|set-cookie/i
+const SECRET_TOKEN_KEYS = new Set([
+  'token',
+  'accesstoken',
+  'refreshtoken',
+  'idtoken',
+  'authtoken',
+])
 const AUTH_VALUE_PATTERN = /^(bearer|basic)\s+\S+/i
 
 type ObjectFrame = {
@@ -114,7 +121,13 @@ function prepareValue(
 }
 
 function shouldRedactKey(key: string): boolean {
-  return SECRET_KEY_PATTERN.test(key)
+  return (
+    SECRET_KEY_PATTERN.test(key) || SECRET_TOKEN_KEYS.has(normalizeKey(key))
+  )
+}
+
+function normalizeKey(key: string): string {
+  return key.replace(/[-_]/g, '').toLowerCase()
 }
 
 function redactString(value: string, mode: ActiveTraceMode): string {
