@@ -1,242 +1,203 @@
-# Claude Code Best V5 (CCB)
+# Claude Code Harness Lab
 
-[![GitHub Stars](https://img.shields.io/github/stars/claude-code-best/claude-code?style=flat-square&logo=github&color=yellow)](https://github.com/claude-code-best/claude-code/stargazers)
-[![GitHub Contributors](https://img.shields.io/github/contributors/claude-code-best/claude-code?style=flat-square&color=green)](https://github.com/claude-code-best/claude-code/graphs/contributors)
-[![GitHub Issues](https://img.shields.io/github/issues/claude-code-best/claude-code?style=flat-square&color=orange)](https://github.com/claude-code-best/claude-code/issues)
-[![GitHub License](https://img.shields.io/github/license/claude-code-best/claude-code?style=flat-square)](https://github.com/claude-code-best/claude-code/blob/main/LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/claude-code-best/claude-code?style=flat-square&color=blue)](https://github.com/claude-code-best/claude-code/commits/main)
-[![Bun](https://img.shields.io/badge/runtime-Bun-black?style=flat-square&logo=bun)](https://bun.sh/)
-[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=flat-square&logo=discord)](https://discord.gg/uApuzJWGKX)
+面向 Claude Code CLI 恢复、裁剪、验证和可观测性实验的工程仓库。
 
-> Which Claude do you like? The open source one is the best.
+本仓库来源于
+[claude-code-best/claude-code](https://github.com/claude-code-best/claude-code)
+的代码基础，但当前目标已经不同：这里不是上游项目主页，也不是 Anthropic
+官方 Claude Code。当前仓库更关注可运行的本地 harness、严格类型检查、功能门控、
+多 provider 兼容、CLI 优先的调试能力，以及可审计的 trace 输出。
 
-牢 A (Anthropic) 官方 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 完整复原的工程化项目。虽然很难绷, 但是它叫做 CCB(踩踩背)... 而且, 我们实现了企业版或者需要登陆 Claude 账号才能使用的特性, 并在此基础上扩展了更多好玩的特性。
+## 项目定位
 
-[Peri Code](https://github.com/KonghaYao/peri)：Claude Code 兼容的 Rust Agent，多年大模型经验匠心制作，国内大模型（DeepSeek/GLM）精调，CPU/内存极致优化，在开发版/树莓派上也能跑 CC 一样的体验。
+- **恢复核心 CLI 能力**：保留 Claude Code 风格的 REPL、pipe 模式、工具调用、
+  会话管理和 provider 适配。
+- **裁剪不匹配目标的内容**：上游 README 中的营销文案、社区入口、赞助信息和
+  与当前实验目标无关的内容不再作为本仓库说明的一部分。
+- **默认保守、显式开启**：新增能力应通过 feature flag 或显式命令开启，避免改变
+  默认运行路径。
+- **验证优先**：TypeScript strict 必须通过；测试使用 `bun:test`；核心改动需要有
+  聚焦测试覆盖。
+- **CLI 优先**：当前仓库的主要交互面是 CLI / REPL / JSONL 文件，不把 Web UI
+  作为第一版验证界面。
 
-[文档在这里](https://ccb.agent-aura.top/) | [留影文档在这里](./Friends.md) | [Discord 群组，群主在线答疑](https://discord.gg/uApuzJWGKX)
+## 当前重点能力
 
-| 特性                        | 说明                                                                                                                         | 文档                                                                                                                                      |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| **Claude 群控技术**         | Pipe IPC 多实例协作：同机 main/sub 自动编排 + LAN 跨机器零配置发现与通讯，`/pipes` 选择面板 + `Shift+↓` 交互 + 消息广播路由 | [Pipe IPC](https://ccb.agent-aura.top/docs/features/uds-inbox) / [LAN](https://ccb.agent-aura.top/docs/features/lan-pipes)                |
-| **ACP 协议一等一支持**      | 支持接入 Zed、Cursor 等 IDE，支持会话恢复、Skills、权限桥接                                                                  | [文档](https://ccb.agent-aura.top/docs/features/acp-zed)                                                                                  |
-| **Remote Control 私有部署** | Docker 自托管远程界面, 可以手机上看 CC                                                                                       | [文档](https://ccb.agent-aura.top/docs/features/remote-control-self-hosting)                                                              |
-| **Langfuse 监控**           | 企业级 Agent 监控, 可以清晰看到每次 agent loop 细节, 可以一键转化为数据集                                                    | [文档](https://ccb.agent-aura.top/docs/features/langfuse-monitoring)                                                                      |
-| **Web Search**              | 内置网页搜索工具, 支持 bing 和 brave 搜索                                                                                    | [文档](https://ccb.agent-aura.top/docs/features/web-browser-tool)                                                                         |
-| **Poor Mode**               | 穷鬼模式，关闭记忆提取和键入建议,大幅度减少并发请求                                                                          | /poor 可以开关                                                                                                                            |
-| **Channels 频道通知**       | MCP 服务器推送外部消息到会话（飞书/Slack/Discord/微信等），`--channels plugin:name@marketplace` 启用                         | [文档](https://ccb.agent-aura.top/docs/features/channels)                                                                                 |
-| **自定义模型供应商**        | OpenAI/Anthropic/Gemini/Grok 兼容  (`/login`)                                                                                          | [文档](https://ccb.agent-aura.top/docs/features/all-features-guide)                                                                        |
-| Voice Mode                  | 语音输入，支持豆包语言输入（`/voice doubao`）                                                                   | [文档](https://ccb.agent-aura.top/docs/features/voice-mode)                                                                               |
-| Computer Use                | 屏幕截图、键鼠控制                                                                                                           | [文档](https://ccb.agent-aura.top/docs/features/computer-use)                                                                             |
-| Chrome Use                  | 浏览器自动化、表单填写、数据抓取                                                                                             | [自托管](https://ccb.agent-aura.top/docs/features/chrome-use-mcp) [原生版](https://ccb.agent-aura.top/docs/features/claude-in-chrome-mcp) |
-| Sentry                      | 企业级错误追踪                                                                                                               | [文档](https://ccb.agent-aura.top/docs/internals/sentry-setup)                                                                            |
-| GrowthBook                  | 企业级特性开关                                                                                                               | [文档](https://ccb.agent-aura.top/docs/internals/growthbook-adapter)                                                                      |
-| /dream 记忆整理             | 自动整理和优化记忆文件                                                                                                       | [文档](https://ccb.agent-aura.top/docs/features/auto-dream)                                                                               |
+| 领域 | 说明 |
+| --- | --- |
+| CLI / REPL | `src/entrypoints/cli.tsx` 是真实入口，完整 CLI 逻辑在 `src/main.tsx` |
+| Query Loop | `src/query.ts` 与 `src/QueryEngine.ts` 管理模型请求、流式响应、工具调用和 turn 生命周期 |
+| Tool System | 内置工具主要来自 `packages/builtin-tools/`，统一经 `src/tools.ts` 注册 |
+| Provider 兼容 | 支持 firstParty、Bedrock、Vertex、Foundry、OpenAI、Gemini、Grok 等 provider 适配层 |
+| Feature Flags | 统一使用 `import { feature } from 'bun:bundle'` 与 `FEATURE_<FLAG_NAME>=1` |
+| ACP / RCS | 保留 Agent Client Protocol、remote control server、自托管远程控制相关模块 |
+| Harness Trace | 新增 `HARNESS_TRACE` 观测链路，默认 off，手动 learn/full/off，JSONL 为第一版 source of truth |
 
-- 🚀 [想要启动项目](#-快速开始源码版)
-- 🐛 [想要调试项目](#vs-code-调试)
-- 📖 [想要学习项目](#teach-me-学习项目)
+## 快速开始
 
-## ⚡ 快速开始(安装版)
+### 环境要求
 
-不用克隆仓库, 从 NPM 下载后, 直接使用
+- [Bun](https://bun.sh/) >= 1.3
+- TypeScript strict 约束必须保持通过
 
-```sh
-npm i -g claude-code-best
+Windows PowerShell 安装 Bun：
 
-# bun 安装比较多问题, 推荐 npm 装
-# bun  i -g claude-code-best
-# bun pm -g trust claude-code-best @claude-code-best/mcp-chrome-bridge
-
-ccb # 以 nodejs 打开 claude code
-ccb-bun # 以 bun 形态打开
-ccb update # 更新到最新版本
-CLAUDE_BRIDGE_BASE_URL=https://remote-control.claude-code-best.win/ CLAUDE_BRIDGE_OAUTH_TOKEN=test-my-key ccb --remote-control # 我们有自部署的远程控制
-```
-
-> **安装/更新失败？** 先 `npm rm -g claude-code-best` 清理旧版本，再 `npm i -g claude-code-best@latest`。仍失败则指定版本号：`npm i -g claude-code-best@<版本号>`
-
-## ⚡ 快速开始(源码版)
-
-### ⚙️ 环境要求
-
-一定要最新版本的 bun 啊, 不然一堆奇奇怪怪的 BUG!!! bun upgrade!!!
-
-- 📦 [Bun](https://bun.sh/) >= 1.3.11
-
-**安装 Bun：**
-
-```bash
-# Linux 和 macOS
-curl -fsSL https://bun.sh/install | bash
-
-# Windows (PowerShell)
+```powershell
 powershell -c "irm bun.sh/install.ps1 | iex"
 ```
 
-**安装后的操作：**
-
-1. **让当前终端识别 `bun` 命令**
-
-   安装脚本会把 `~/.bun/bin` 写入对应的 shell 配置文件。macOS 默认 zsh 环境通常会看到：
-
-   ```text
-   Added "~/.bun/bin" to $PATH in "~/.zshrc"
-   ```
-
-   可以按安装脚本提示重启当前 shell：
-
-   ```bash
-   exec /bin/zsh
-   ```
-
-   如果你使用 bash，重新加载 bash 配置：
-
-   ```bash
-   source ~/.bashrc
-   ```
-
-   Windows PowerShell 用户关闭并重新打开 PowerShell 即可。
-
-2. **验证 Bun 是否可用**
-
-   ```bash
-   bun --help
-   bun --version
-   ```
-
-3. **如果已经安装过 Bun，更新到最新版本**
-
-   ```bash
-   bun upgrade
-   ```
-
-- ⚙️ 常规的配置 CC 的方式, 各大提供商都有自己的配置方式
-
-### 📍 命令执行位置
-
-- 安装或检查 Bun 的命令可以在任意目录执行：
-  `curl -fsSL https://bun.sh/install | bash`、`bun --help`、`bun --version`、`bun upgrade`
-- 安装本项目依赖、启动开发模式、构建项目时，必须先进入本仓库根目录，也就是包含 `package.json` 的目录。
-
-### 📥 安装
+macOS / Linux 安装 Bun：
 
 ```bash
-cd /path/to/claude-code
+curl -fsSL https://bun.sh/install | bash
+```
+
+### 安装依赖
+
+```bash
 bun install
 ```
 
-### ▶️ 运行
+### 开发运行
 
 ```bash
-# 开发模式, 看到版本号 888 说明就是对了
+# 启动完整 CLI / REPL
 bun run dev
 
-# 构建
+# Pipe 模式
+echo "say hello" | bun run src/entrypoints/cli.tsx -p
+
+# 调试模式
+bun run dev:inspect
+```
+
+### 构建
+
+```bash
 bun run build
 ```
 
-构建采用 code splitting 多文件打包（`build.ts`），产物输出到 `dist/` 目录（入口 `dist/cli.js` + 约 450 个 chunk 文件）。
+构建入口是 `src/entrypoints/cli.tsx`，输出到 `dist/`。构建流程由
+`build.ts` 管理，并会处理运行时兼容所需的后处理步骤。
 
-构建出的版本 bun 和 node 都可以启动, 你 publish 到私有源可以直接启动
+## 常用验证命令
 
-如果遇到 bug 请直接提一个 issues, 我们优先解决
+```bash
+# 类型检查
+bun run typecheck
 
-### 👤 新人配置 /login
+# 全量测试
+bun test
 
-首次运行后，在 REPL 中输入 `/login` 命令进入登录配置界面，选择 **Anthropic Compatible** 即可对接第三方 API 兼容服务（无需 Anthropic 官方账号）。
-选择 OpenAI 和 Gemini 对应的栏目都是支持相应协议的
+# 指定测试文件
+bun test src/trace
 
-需要填写的字段：
+# 项目预检查，包含类型、lint/format 修复和测试
+bun run precheck
+```
 
-| 📌 字段      | 📝 说明       | 💡 示例                      |
-| ------------ | ------------- | ---------------------------- |
-| Base URL     | API 服务地址  | `https://api.example.com/v1` |
-| API Key      | 认证密钥      | `sk-xxx`                     |
-| Haiku Model  | 快速模型 ID   | `claude-haiku-4-5-20251001`  |
-| Sonnet Model | 均衡模型 ID   | `claude-sonnet-4-6`          |
-| Opus Model   | 高性能模型 ID | `claude-opus-4-6`            |
+提交前至少应根据改动范围运行聚焦测试和 `bun run typecheck`。涉及共享入口、
+provider、工具执行、状态管理或 trace 边界的改动，应扩大测试范围。
 
-- ⌨️ **Tab / Shift+Tab** 切换字段，**Enter** 确认并跳到下一个，最后一个字段按 Enter 保存
+## Harness Trace
 
-> ℹ️ 支持所有 Anthropic API 兼容服务（如 OpenRouter、AWS Bedrock 代理等），只要接口兼容 Messages API 即可。
+Harness Trace 是本仓库用于观察 CLI / query / API / tool / subagent 运行边界的
+JSONL trace 系统。
+
+核心边界：
+
+- 默认关闭。
+- `learn` / `full` 必须手动开启，并持续到显式 `off`。
+- trace 只能作为 observer，不进入 model messages、system prompt、user context
+  或 tool input。
+- JSONL 文件是第一版 source of truth。
+- 第一版以 CLI 查看为主，不做 Web UI。
+
+开发模式下可用：
+
+```bash
+# 查看状态
+bun run dev trace status
+
+# 开启精简学习视图
+bun run dev trace learn
+
+# 开启更完整的调试视图
+bun run dev trace full
+
+# 关闭 trace
+bun run dev trace off
+
+# 列出 session
+bun run dev trace list
+
+# 回放 session
+bun run dev trace replay <session-id>
+
+# 输出 session 摘要
+bun run dev trace inspect <session-id>
+```
+
+可通过 `CLAUDE_CODE_TRACE_DIR` 指定 trace 输出目录。
 
 ## Feature Flags
 
-所有功能开关通过 `FEATURE_<FLAG_NAME>=1` 环境变量启用，例如：
+运行时功能统一通过 feature flag 控制：
 
 ```bash
-FEATURE_BUDDY=1 FEATURE_FORK_SUBAGENT=1 bun run dev
+FEATURE_HARNESS_TRACE=1 bun run dev
+FEATURE_BRIDGE_MODE=1 bun run dev
 ```
 
-各 Feature 的详细说明见 [`docs/features/`](docs/features/) 目录，欢迎投稿补充。
+开发模式和构建模式各自有默认启用列表，集中维护在 `scripts/defines.ts`、
+`scripts/dev.ts` 和 `build.ts`。新增功能应遵守现有模式：
 
-## VS Code 调试
+- 使用 `import { feature } from 'bun:bundle'`。
+- `feature('FLAG_NAME')` 只放在 `if` 条件或三元表达式条件位置。
+- 不绕过 feature flag 直接改变默认路径。
 
-TUI (REPL) 模式需要真实终端，无法直接通过 VS Code launch 启动调试。使用 **attach 模式**：
+## 目录导览
 
-### 步骤
+| 路径 | 说明 |
+| --- | --- |
+| `src/entrypoints/cli.tsx` | CLI 真入口，处理快速路径和完整 CLI 加载 |
+| `src/main.tsx` | Commander CLI 定义与主要命令分发 |
+| `src/query.ts` | 核心模型请求与工具调用循环 |
+| `src/QueryEngine.ts` | REPL 使用的高层 query 编排器 |
+| `src/services/api/` | Anthropic 及第三方 provider 兼容层 |
+| `src/services/tools/` | 工具执行、权限、hook、streaming executor |
+| `packages/builtin-tools/` | 内置工具实现 |
+| `src/trace/` | Harness Trace 核心实现与 CLI viewer |
+| `src/commands/` | Slash command 实现 |
+| `packages/remote-control-server/` | 自托管 Remote Control Server |
+| `docs/features/` | 功能说明文档 |
+| `docs/superpowers/` | 本地计划、规格和 review 文档 |
 
-1. **终端启动 inspect 服务**：
+## 开发约束
 
-   ```bash
-   bun run dev:inspect
-   ```
+- Runtime 使用 Bun，不按 Node-only 项目处理。
+- TypeScript strict 必须保持零错误。
+- 生产代码避免 `as any`；优先使用类型守卫、明确 interface 或
+  `as unknown as SpecificType`。
+- 不要重写 `feature()` 机制。
+- 不要把 trace 数据注入模型消息、system prompt、用户上下文或工具输入。
+- 不要提交构建产物、临时 trace 数据、个人工作目录或未确认的生成文件。
+- 修改已有文件时尊重当前工作树中的用户改动，不做无关回滚。
+- Commit message 使用 Conventional Commits，例如：
 
-   会输出类似 `ws://localhost:8888/xxxxxxxx` 的地址。
-2. **VS Code 附着调试器**：
-
-   - 在 `src/` 文件中打断点
-   - F5 → 选择 **"Attach to Bun (TUI debug)"**
-
-## Teach Me 学习项目
-
-我们新加了一个 teach-me skills, 通过问答式引导帮你理解这个项目的任何模块。(调整 [sigma skill 而来](https://github.com/sanyuan0704/sanyuan-skills))
-
-```bash
-# 在 REPL 中直接输入
-/teach-me Claude Code 架构
-/teach-me React Ink 终端渲染 --level beginner
-/teach-me Tool 系统 --resume
+```text
+feat: add harness trace viewer
+fix: redact trace token secrets
+docs: rewrite project readme
 ```
 
-### 它能做什么
+## 与上游项目的关系
 
-- **诊断水平** — 自动评估你对相关概念的掌握程度，跳过已知的、聚焦薄弱的
-- **构建学习路径** — 将主题拆解为 5-15 个原子概念，按依赖排序逐步推进
-- **苏格拉底式提问** — 用选项引导思考，而非直接给答案
-- **错误概念追踪** — 发现并纠正深层误解
-- **断点续学** — `--resume` 从上次进度继续
+本仓库保留了上游代码基础中的大量工程模块，但 README、测试策略和后续改动会以
+当前 harness lab 目标为准。若发现上游遗留说明与当前目标冲突，以本 README、
+`CLAUDE.md` / `AGENTS.md` 和仓库内最新计划文档为准。
 
-### 学习记录
+## 免责声明
 
-学习进度保存在 `.claude/skills/teach-me/` 目录下，支持跨主题学习者档案。
-
-## 相关文档及网站
-
-- **在线文档（Mintlify）**: [ccb.agent-aura.top](https://ccb.agent-aura.top/) — 文档源码位于 [`docs/`](docs/) 目录，欢迎投稿 PR
-- **DeepWiki**: [https://deepwiki.com/claude-code-best/claude-code](https://deepwiki.com/claude-code-best/claude-code)
-
-## Contributors
-
-<a href="https://github.com/claude-code-best/claude-code/graphs/contributors">
-  <img src="contributors.svg" alt="Contributors" />
-</a>
-
-## Star History
-
-<a href="https://www.star-history.com/?repos=claude-code-best%2Fclaude-code&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=claude-code-best/claude-code&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=claude-code-best/claude-code&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=claude-code-best/claude-code&type=date&legend=top-left" />
- </picture>
-</a>
-
-## 致谢
-
-- [doubaoime-asr](https://github.com/starccy/doubaoime-asr) — 豆包 ASR 语音识别 SDK，为 Voice Mode 提供无需 Anthropic OAuth 的语音输入方案
-
-## 许可证
-
-本项目仅供学习研究用途。Claude Code 的所有权利归 [Anthropic](https://www.anthropic.com/) 所有。
+本项目仅用于学习、研究和本地工程验证。Claude Code 与相关商标、产品权利归
+Anthropic 所有。本仓库不是 Anthropic 官方项目。
