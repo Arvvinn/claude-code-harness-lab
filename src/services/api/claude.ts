@@ -343,31 +343,30 @@ function buildAPIStreamEventTracePayload(
   })
 
   if (mode === 'learn') {
+    const learnPayload: Record<string, unknown> = removeUndefinedTraceFields({
+      eventType: event.type,
+      requestId: input.requestId,
+      clientRequestId: input.clientRequestId,
+    })
+
     switch (event.type) {
       case 'message_start':
         return {
-          ...payload,
+          ...learnPayload,
           messageId: event.message.id,
         }
       case 'content_block_start':
         return {
-          ...payload,
-          contentBlockIndex: event.index,
+          ...learnPayload,
           ...summarizeContentBlockForLearnTrace(event.content_block),
         }
       case 'content_block_delta':
-        return {
-          ...payload,
-          contentBlockIndex: event.index,
-        }
+        return learnPayload
       case 'content_block_stop':
-        return {
-          ...payload,
-          contentBlockIndex: event.index,
-        }
+        return learnPayload
       case 'message_delta':
       case 'message_stop':
-        return payload
+        return learnPayload
     }
   }
 

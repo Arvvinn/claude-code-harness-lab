@@ -438,42 +438,26 @@ describe('claude API trace instrumentation behavior boundaries', () => {
       querySource: 'sdk',
     })
     expect(messageStartPayload).toEqual({
-      attempt: 1,
       clientRequestId: 'client-1',
-      elapsedMs: 41,
       eventType: 'message_start',
       messageId: 'msg_123',
-      provider: 'firstParty',
       requestId: 'req_stream',
     })
-    expect(contentBlockStartPayload).toMatchObject({
-      attempt: 1,
+    expect(contentBlockStartPayload).toEqual({
       clientRequestId: 'client-1',
-      contentBlockIndex: 0,
       contentBlockId: 'toolu_123',
-      elapsedMs: 42,
       eventType: 'content_block_start',
-      provider: 'firstParty',
       requestId: 'req_stream',
     })
     expect(contentBlockDeltaPayload).toEqual({
-      attempt: 1,
       clientRequestId: 'client-1',
-      contentBlockIndex: 0,
-      elapsedMs: 43,
       eventType: 'content_block_delta',
-      provider: 'firstParty',
       requestId: 'req_stream',
-      timeSincePreviousEventMs: 1,
     })
     expect(messageDeltaPayload).toEqual({
-      attempt: 1,
       clientRequestId: 'client-1',
-      elapsedMs: 44,
       eventType: 'message_delta',
-      provider: 'firstParty',
       requestId: 'req_stream',
-      timeSincePreviousEventMs: 1,
     })
 
     const serializedRequestPayload = JSON.stringify(requestPayload)
@@ -495,11 +479,16 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     )
     expect(serializedStreamPayload).not.toContain('claude-leaky-model')
     expect(serializedStreamPayload).not.toContain('dangerous_tool_name')
+    expect(serializedStreamPayload).not.toContain('attempt')
+    expect(serializedStreamPayload).not.toContain('contentBlockIndex')
     expect(serializedStreamPayload).not.toContain('contentBlockType')
     expect(serializedStreamPayload).not.toContain('deltaType')
+    expect(serializedStreamPayload).not.toContain('elapsedMs')
+    expect(serializedStreamPayload).not.toContain('provider')
     expect(serializedStreamPayload).not.toContain('usage')
     expect(serializedStreamPayload).not.toContain('stopReason')
     expect(serializedStreamPayload).not.toContain('rawEvent')
+    expect(serializedStreamPayload).not.toContain('timeSincePreviousEventMs')
   })
 
   test('full-mode request_built payloads include raw request params that redact secret values', () => {
