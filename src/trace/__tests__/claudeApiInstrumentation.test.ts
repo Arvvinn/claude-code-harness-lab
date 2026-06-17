@@ -211,10 +211,14 @@ describe('claude API trace instrumentation behavior boundaries', () => {
         toolCount: 1,
       },
     })
-    expect(JSON.stringify(traceEvents[0].payload)).not.toContain(
+    expect(JSON.stringify(traceEvents[0].payload)).toContain(
       'raw prompt must stay out of trace',
     )
-    expect(JSON.stringify(traceEvents[0].payload)).not.toContain('secret-token')
+    const serializedRedactedPayload = JSON.stringify(
+      redactTracePayload(traceEvents[0].payload, 'learn'),
+    )
+    expect(serializedRedactedPayload).not.toContain('secret-token')
+    expect(serializedRedactedPayload).toContain('[REDACTED]')
   })
 
   test('fallback request_built full payload reflects non-streaming adjusted params sent to the SDK', async () => {
@@ -383,7 +387,7 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     })
   })
 
-  test('learn-mode stream payloads keep only tracing metadata and drop raw content details', () => {
+  test('learn-mode request payloads keep full request params while stream payloads stay compact', () => {
     const requestPayload = claudeApiTraceInternals.buildAPIRequestTracePayload(
       {
         model: 'claude-test',
@@ -514,6 +518,20 @@ describe('claude API trace instrumentation behavior boundaries', () => {
       previousRequestId: 'prev-1',
       provider: 'firstParty',
       querySource: 'sdk',
+      rawRequestParams: {
+        model: 'claude-test',
+        max_tokens: 256,
+        messages: [
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'top secret prompt text' }],
+          },
+        ],
+        betas: ['beta-a', 'beta-b'],
+        headers: {
+          authorization: 'Bearer super-secret',
+        },
+      },
     })
     expect(messageStartPayload).toEqual({
       clientRequestId: 'client-1',
@@ -539,6 +557,9 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     })
 
     const serializedRequestPayload = JSON.stringify(requestPayload)
+    const serializedRedactedRequestPayload = JSON.stringify(
+      redactTracePayload(requestPayload, 'learn'),
+    )
     const serializedStreamPayload = JSON.stringify([
       messageStartPayload,
       contentBlockStartPayload,
@@ -546,9 +567,11 @@ describe('claude API trace instrumentation behavior boundaries', () => {
       messageDeltaPayload,
     ])
 
-    expect(serializedRequestPayload).not.toContain('top secret prompt text')
-    expect(serializedRequestPayload).not.toContain('super-secret')
-    expect(serializedRequestPayload).not.toContain('authorization')
+    expect(serializedRequestPayload).toContain('top secret prompt text')
+    expect(serializedRedactedRequestPayload).toContain('top secret prompt text')
+    expect(serializedRedactedRequestPayload).not.toContain('super-secret')
+    expect(serializedRedactedRequestPayload).toContain('authorization')
+    expect(serializedRedactedRequestPayload).toContain('[REDACTED]')
     expect(serializedStreamPayload).not.toContain(
       'raw tool input should not be recorded',
     )

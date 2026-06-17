@@ -213,6 +213,9 @@ describe('runToolUse trace instrumentation', () => {
           payload: expect.objectContaining({
             toolName: 'TraceExecTool',
             toolUseId: 'toolu_nonstream_serial_1',
+            toolInput: {
+              secret: '[REDACTED]',
+            },
             status: 'detected',
             durationMs: 0,
           }),
@@ -223,6 +226,9 @@ describe('runToolUse trace instrumentation', () => {
           payload: expect.objectContaining({
             toolName: 'TraceSecondTool',
             toolUseId: 'toolu_nonstream_serial_2',
+            toolInput: {
+              secret: '[REDACTED]',
+            },
             status: 'detected',
             durationMs: 0,
           }),
@@ -329,10 +335,18 @@ describe('runToolUse trace instrumentation', () => {
       expect(
         events.filter(event => event.type === 'tool.started'),
       ).toHaveLength(1)
+      expect(
+        events.find(event => event.type === 'tool.started')?.payload,
+      ).toMatchObject({
+        toolInput: {
+          secret: '[REDACTED]',
+        },
+      })
       expect(hookState.seenPreContext).not.toHaveProperty('traceTurnId')
       expect(hookState.seenPermissionContext).not.toHaveProperty('traceTurnId')
       expect(seenCallContexts).toHaveLength(1)
       expect(seenCallContexts[0]).not.toHaveProperty('traceTurnId')
+      expect(JSON.stringify(events)).toContain('toolInput')
       expect(JSON.stringify(events)).not.toContain('model input secret')
     })
 
@@ -409,7 +423,11 @@ describe('runToolUse trace instrumentation', () => {
         classification: 'validation',
         errorName: 'InputValidationError',
         message: 'synthetic validateInput failure',
+        toolInput: {
+          secret: '[REDACTED]',
+        },
       })
+      expect(JSON.stringify(errorEvent)).not.toContain('model input secret')
     })
 
     test('emits permission_result and permission_denied tool.error for deny decisions', async () => {
@@ -459,7 +477,11 @@ describe('runToolUse trace instrumentation', () => {
       ).toMatchObject({
         classification: 'permission_denied',
         message: 'Permission denied by test',
+        toolInput: {
+          secret: '[REDACTED]',
+        },
       })
+      expect(JSON.stringify(events)).not.toContain('model input secret')
     })
 
     test('emits permission_ask tool.error for ask-return-error decisions', async () => {
@@ -509,7 +531,11 @@ describe('runToolUse trace instrumentation', () => {
       ).toMatchObject({
         classification: 'permission_ask',
         message: 'Permission ask returned error',
+        toolInput: {
+          secret: '[REDACTED]',
+        },
       })
+      expect(JSON.stringify(events)).not.toContain('model input secret')
     })
 
     test('emits tool.cancelled for direct pre-run cancellation', async () => {
@@ -589,7 +615,11 @@ describe('runToolUse trace instrumentation', () => {
         classification: 'hook_error',
         errorName: 'Error',
         message: 'synthetic pre hook failure',
+        toolInput: {
+          secret: '[REDACTED]',
+        },
       })
+      expect(JSON.stringify(events)).not.toContain('model input secret')
     })
 
     test('pairs PostToolUse hook.result and emits tool.error when PostToolUse throws', async () => {
@@ -616,14 +646,13 @@ describe('runToolUse trace instrumentation', () => {
       )
       await flushTraceForTesting()
 
-      const postResultEvent = getNonSessionEvents().find(
+      const events = getNonSessionEvents()
+      const postResultEvent = events.find(
         event =>
           event.type === 'hook.result' &&
           event.payload.hookEvent === 'PostToolUse',
       )
-      const toolErrorEvent = getNonSessionEvents().find(
-        event => event.type === 'tool.error',
-      )
+      const toolErrorEvent = events.find(event => event.type === 'tool.error')
       expect(postResultEvent?.payload).toMatchObject({
         status: 'error',
         errorName: 'Error',
@@ -633,7 +662,11 @@ describe('runToolUse trace instrumentation', () => {
         classification: 'hook_error',
         errorName: 'Error',
         message: 'synthetic post hook failure',
+        toolInput: {
+          secret: '[REDACTED]',
+        },
       })
+      expect(JSON.stringify(events)).not.toContain('model input secret')
     })
 
     test('pairs PostToolUseFailure hook.result when failure hook throws', async () => {
@@ -663,6 +696,9 @@ describe('runToolUse trace instrumentation', () => {
       await flushTraceForTesting()
 
       const events = getNonSessionEvents()
+      const toolErrorPayloads = events
+        .filter(event => event.type === 'tool.error')
+        .map(event => event.payload)
       const failureResultEvent = events.find(
         event =>
           event.type === 'hook.result' &&
@@ -673,13 +709,23 @@ describe('runToolUse trace instrumentation', () => {
         errorName: 'Error',
         message: 'synthetic failure hook failure',
       })
-      expect(
-        events.filter(event => event.type === 'tool.error').at(-1)?.payload,
-      ).toMatchObject({
+      expect(toolErrorPayloads[0]).toMatchObject({
+        classification: 'tool_call_error',
+        errorName: 'Error',
+        message: 'synthetic tool failure',
+        toolInput: {
+          secret: '[REDACTED]',
+        },
+      })
+      expect(toolErrorPayloads.at(-1)).toMatchObject({
         classification: 'hook_error',
         errorName: 'Error',
         message: 'synthetic failure hook failure',
+        toolInput: {
+          secret: '[REDACTED]',
+        },
       })
+      expect(JSON.stringify(events)).not.toContain('model input secret')
     })
   }
 

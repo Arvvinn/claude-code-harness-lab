@@ -523,9 +523,10 @@ function buildToolErrorTracePayload(input: {
   errorName?: string
   message?: string
   classification?: ToolTraceErrorClassification
+  toolInput?: unknown
 }): Record<string, unknown> {
   const error = input.error
-  return {
+  const payload: Record<string, unknown> = {
     errorName: input.errorName ?? getTraceErrorName(error),
     message: input.message ?? getTraceErrorMessage(error),
     classification:
@@ -533,6 +534,12 @@ function buildToolErrorTracePayload(input: {
       (error === undefined ? 'tool_call_error' : classifyTraceToolError(error)),
     durationMs: input.durationMs,
   }
+
+  if (input.toolInput !== undefined) {
+    payload.toolInput = input.toolInput
+  }
+
+  return payload
 }
 
 function buildToolCancelledTracePayload(input: {
@@ -630,6 +637,7 @@ export async function* runToolUse(
           message: `No such tool available: ${toolName}`,
           classification: 'unknown_tool',
           durationMs: 0,
+          toolInput: toolUse.input,
         }),
       )
     }
@@ -947,6 +955,7 @@ async function checkPermissionsAndCallTool(
           message: errorContent,
           classification: 'validation',
           durationMs: 0,
+          toolInput: input,
         }),
       )
     }
@@ -1015,6 +1024,7 @@ async function checkPermissionsAndCallTool(
           message: isValidCall.message ?? 'Input validation failed',
           classification: 'validation',
           durationMs: 0,
+          toolInput: parsedInput.data,
         }),
       )
     }
@@ -1220,6 +1230,7 @@ async function checkPermissionsAndCallTool(
           error,
           classification: 'hook_error',
           durationMs,
+          toolInput: processedInput,
         }),
       )
     }
@@ -1434,6 +1445,7 @@ async function checkPermissionsAndCallTool(
               ? 'permission_ask'
               : 'permission_denied',
           durationMs: permissionDurationMs,
+          toolInput: processedInput,
         }),
       )
     }
@@ -1598,6 +1610,7 @@ async function checkPermissionsAndCallTool(
       {
         status: 'started',
         durationMs: 0,
+        toolInput: processedInput,
       },
     )
   }
@@ -2029,6 +2042,7 @@ async function checkPermissionsAndCallTool(
             error,
             classification: 'hook_error',
             durationMs,
+            toolInput: processedInput,
           }),
         )
         toolErrorTraceEmitted = true
@@ -2246,6 +2260,7 @@ async function checkPermissionsAndCallTool(
           buildToolErrorTracePayload({
             error,
             durationMs,
+            toolInput: processedInput,
           }),
         )
       }
@@ -2314,6 +2329,7 @@ async function checkPermissionsAndCallTool(
             error: hookError,
             classification: 'hook_error',
             durationMs: hookDurationMs,
+            toolInput: processedInput,
           }),
         )
       }

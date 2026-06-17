@@ -96,7 +96,7 @@ if (feature('HARNESS_TRACE')) {
       await rm(traceDir, { recursive: true, force: true })
     })
 
-    test('emits loop boundaries with provided turn metadata and no prompt text', async () => {
+    test('emits loop boundaries with provided turn metadata and full study context', async () => {
       startTraceSession({
         sessionId: 'session-query-loop',
         cwd: traceDir,
@@ -115,12 +115,19 @@ if (feature('HARNESS_TRACE')) {
         },
       }
 
-      const rawPrompt = 'raw user prompt must not appear in trace payloads'
+      const rawPrompt = 'raw user prompt should appear in trace payloads'
+      const promptMessage = createUserMessage({ content: rawPrompt })
+      expect(promptMessage).toMatchObject({
+        type: 'user',
+        message: {
+          content: rawPrompt,
+        },
+      })
       const generator = query({
-        messages: [createUserMessage({ content: rawPrompt })],
-        systemPrompt: asSystemPrompt([]),
-        userContext: {},
-        systemContext: {},
+        messages: [promptMessage],
+        systemPrompt: asSystemPrompt(['system prompt for trace study']),
+        userContext: { cwd: traceDir },
+        systemContext: { platform: 'test-platform' },
         canUseTool: async (_tool, input) => ({
           behavior: 'allow',
           updatedInput: input,
@@ -141,6 +148,7 @@ if (feature('HARNESS_TRACE')) {
       const loopEvents = events.filter(event =>
         event.type.startsWith('query.loop_'),
       )
+      const serializedEvents = JSON.stringify(events)
 
       expect(queryEvents.map(event => event.type)).toEqual([
         'query.loop_start',
@@ -158,19 +166,31 @@ if (feature('HARNESS_TRACE')) {
         loopIndex: 1,
         messageCount: 1,
         querySource: 'sdk',
+        messages: [
+          expect.objectContaining({
+            type: 'user',
+            message: expect.objectContaining({
+              content: rawPrompt,
+            }),
+          }),
+        ],
+        systemPrompt: ['system prompt for trace study'],
+        userContext: { cwd: traceDir },
+        systemContext: { platform: 'test-platform' },
       })
       expect(loopEvents[1].payload).toMatchObject({
         stopReason: 'completed',
         assistantMessageCount: 1,
         toolUseCount: 0,
       })
-      expect(JSON.stringify(events)).not.toContain(rawPrompt)
+      expect(serializedEvents).toContain(rawPrompt)
+      expect(serializedEvents).toContain('system prompt for trace study')
       expect(getTraceEventsPath('session-query-loop')).toContain(
         'session-query-loop',
       )
     })
 
-    test('emits direct query turn boundaries with a trace-only turn id and no prompt text', async () => {
+    test('emits direct query turn boundaries with a trace-only turn id and full raw input', async () => {
       startTraceSession({
         sessionId: 'session-query-direct',
         cwd: traceDir,
@@ -189,12 +209,12 @@ if (feature('HARNESS_TRACE')) {
         },
       }
 
-      const rawPrompt = 'direct query raw prompt must not appear in trace'
+      const rawPrompt = 'direct query raw prompt should appear in trace'
       const generator = query({
         messages: [createUserMessage({ content: rawPrompt })],
-        systemPrompt: asSystemPrompt([]),
-        userContext: {},
-        systemContext: {},
+        systemPrompt: asSystemPrompt(['direct system prompt for trace study']),
+        userContext: { project: 'trace-lab' },
+        systemContext: { shell: 'powershell' },
         canUseTool: async (_tool, input) => ({
           behavior: 'allow',
           updatedInput: input,
@@ -233,6 +253,17 @@ if (feature('HARNESS_TRACE')) {
         inputChars: rawPrompt.length,
         messageCount: 1,
         querySource: 'repl_main_thread',
+        messages: [
+          expect.objectContaining({
+            type: 'user',
+            message: expect.objectContaining({
+              content: rawPrompt,
+            }),
+          }),
+        ],
+        systemPrompt: ['direct system prompt for trace study'],
+        userContext: { project: 'trace-lab' },
+        systemContext: { shell: 'powershell' },
       })
       expect(queryEvents[4].payload).toMatchObject({
         success: true,
@@ -241,7 +272,10 @@ if (feature('HARNESS_TRACE')) {
         stopReason: 'completed',
         finalMessageCount: 2,
       })
-      expect(JSON.stringify(events)).not.toContain(rawPrompt)
+      expect(JSON.stringify(events)).toContain(rawPrompt)
+      expect(JSON.stringify(events)).toContain(
+        'direct system prompt for trace study',
+      )
     })
 
     test('forwards early consumer return values to the traced query loop', async () => {

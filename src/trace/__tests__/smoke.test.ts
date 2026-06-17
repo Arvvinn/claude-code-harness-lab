@@ -3,9 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { traceMain } from '../cli.js'
-import { loadTraceConfig } from '../config.js'
+import { loadTraceConfig, resetTraceConfigCacheForTesting } from '../config.js'
 import { formatTraceRecord } from '../format.js'
-import { getTraceRootDir } from '../paths.js'
 import { appendTraceEvent, readTraceEvents } from '../store.js'
 import type { TraceEvent } from '../types.js'
 
@@ -29,37 +28,51 @@ describe('harness trace smoke coverage', () => {
   })
 
   test('config persists off to learn to full to off through CLI mode commands', async () => {
+    useSmokeTraceDir()
     expect(loadTraceConfig().mode).toBe('off')
 
     expect((await runTrace(['learn'])).exitCode).toBe(0)
+    useSmokeTraceDir()
     expect(loadTraceConfig().mode).toBe('learn')
 
     expect((await runTrace(['full'])).exitCode).toBe(0)
+    useSmokeTraceDir()
     expect(loadTraceConfig().mode).toBe('full')
 
     expect((await runTrace(['off'])).exitCode).toBe(0)
+    useSmokeTraceDir()
     expect(loadTraceConfig().mode).toBe('off')
   })
 
   test('status works with an empty trace directory', async () => {
+    useSmokeTraceDir()
     const result = await runTrace(['status'])
 
     expect(result.exitCode).toBe(0)
     expect(result.stderr).toBe('')
     expect(result.stdout).toContain('Trace status')
     expect(result.stdout).toContain('Mode: off')
-    expect(result.stdout).toContain(`Trace dir: ${getTraceRootDir()}`)
+    expect(result.stdout).toContain(`Trace dir: ${traceDir}`)
     expect(result.stdout).toContain('Active session: none')
   })
 
   test('store replays a synthetic session with turn, api, tool, and subagent events', async () => {
+    useSmokeTraceDir()
     const events = [
       makeTraceEvent({
         eventId: 'event-turn',
         sequence: 1,
         source: 'repl',
         type: 'turn.start',
-        payload: { inputChars: 12 },
+        payload: {
+          inputChars: 12,
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'summarize trace smoke' },
+            },
+          ],
+        },
       }),
       makeTraceEvent({
         eventId: 'event-api',
@@ -98,12 +111,28 @@ describe('harness trace smoke coverage', () => {
     const result = await runTrace(['replay', 'session-1'])
 
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain('turn.start inputChars=12')
-    expect(result.stdout).toContain(
-      'api.request_built model=claude-sonnet messageCount=2',
-    )
-    expect(result.stdout).toContain('tool.result toolName=Read ok=true')
-    expect(result.stdout).toContain('subagent.ended status=completed')
+    expect(result.stdout).toContain('Agent Loop Replay')
+    expect(result.stdout).toContain('Pattern: User -> messages[] -> LLM')
+    expect(result.stdout).toContain('[USER]')
+    expect(result.stdout).toContain('summarize trace smoke')
+    expect(result.stdout).toContain('[LLM]')
+    expect(result.stdout).toContain('claude-sonnet')
+    expect(result.stdout).toContain('"messageCount": 2')
+    expect(result.stdout).toContain('[TOOL]')
+    expect(result.stdout).toContain('Read')
+    expect(result.stdout).toContain('[SUBAGENT]')
+    expect(result.stdout).toContain('completed')
+    expect(result.stdout).not.toContain('turn.start inputChars=12')
+
+    const rawResult = await runTrace(['replay', 'session-1', '--raw'])
+
+    expect(rawResult.exitCode).toBe(0)
+    expect(rawResult.stdout).toContain('"type":"turn.start"')
+    expect(rawResult.stdout).toContain('"inputChars":12')
+    expect(rawResult.stdout).toContain('"type":"api.request_built"')
+    expect(rawResult.stdout).toContain('"type":"tool.result"')
+    expect(rawResult.stdout).toContain('"type":"subagent.ended"')
+    expect(rawResult.stdout).not.toContain('Agent Loop Replay')
   })
 
   test('learn formatter hides raw prompt text when summary is present', () => {
@@ -160,6 +189,7 @@ async function runTrace(args: string[]): Promise<{
   stdout: string
   stderr: string
 }> {
+  useSmokeTraceDir()
   let stdout = ''
   let stderr = ''
 
@@ -184,6 +214,11 @@ async function runTrace(args: string[]): Promise<{
     stdout,
     stderr,
   }
+}
+
+function useSmokeTraceDir(): void {
+  process.env.CLAUDE_CODE_TRACE_DIR = traceDir
+  resetTraceConfigCacheForTesting()
 }
 
 function makeTraceEvent(overrides: Partial<TraceEvent> = {}): TraceEvent {

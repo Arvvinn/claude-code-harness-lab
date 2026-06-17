@@ -148,16 +148,10 @@ function normalizeKey(key: string): string {
   return key.replace(/[-_]/g, '').toLowerCase()
 }
 
-function redactString(value: string, mode: ActiveTraceMode): string {
+function redactString(value: string, _mode: ActiveTraceMode): string {
   if (AUTH_VALUE_PATTERN.test(value)) {
     return REDACTED
   }
 
-  const maxLength = mode === 'learn' ? 500 : 20000
-
-  if (value.length <= maxLength) {
-    return value
-  }
-
-  return value.slice(0, maxLength)
+  return value
 }
