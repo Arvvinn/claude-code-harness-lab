@@ -16,6 +16,7 @@ import { query } from 'src/query.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
 import { getDumpPromptsPath } from 'src/services/api/dumpPrompts.js'
 import { cleanupAgentTracking } from 'src/services/api/promptCacheBreakDetection.js'
+import { emitTrace, getTraceMode } from 'src/trace/bus.js'
 import {
   connectToServer,
   fetchToolsForClient,
@@ -232,6 +233,172 @@ type QueryMessage =
   | Message
   | ToolUseSummaryMessage
   | TombstoneMessage
+
+type SubagentStatus = 'completed' | 'aborted' | 'error'
+
+const PROMPT_PREVIEW_CHARS = 200
+
+export function buildSubagentStartedTracePayload({
+  agentType,
+  agentName,
+  agentId,
+  parentToolUseId,
+  parentAgentId,
+  mode,
+  promptMessages,
+}: {
+  agentType: string
+  agentName: string
+  agentId: string
+  parentToolUseId?: string
+  parentAgentId?: string
+  mode: 'learn' | 'full'
+  promptMessages: Message[]
+}): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    agentType,
+    agentName,
+    agentId,
+    promptSummary: summarizePromptMessages(promptMessages),
+  }
+
+  if (parentToolUseId !== undefined) {
+    payload.parentToolUseId = parentToolUseId
+  }
+  if (parentAgentId !== undefined) {
+    payload.parentAgentId = parentAgentId
+  }
+  if (mode === 'full') {
+    payload.promptMessages = promptMessages
+  }
+
+  return payload
+}
+
+export function buildSubagentEndedTracePayload({
+  agentType,
+  agentName,
+  agentId,
+  parentToolUseId,
+  parentAgentId,
+  status,
+  durationMs,
+  finalMessageCount,
+  availableToolCount,
+  toolUseCount,
+}: {
+  agentType: string
+  agentName: string
+  agentId: string
+  parentToolUseId?: string
+  parentAgentId?: string
+  status: SubagentStatus
+  durationMs: number
+  finalMessageCount: number
+  availableToolCount?: number
+  toolUseCount?: number
+}): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    agentType,
+    agentName,
+    agentId,
+    status,
+    durationMs,
+    finalMessageCount,
+  }
+
+  if (parentToolUseId !== undefined) {
+    payload.parentToolUseId = parentToolUseId
+  }
+  if (parentAgentId !== undefined) {
+    payload.parentAgentId = parentAgentId
+  }
+  if (availableToolCount !== undefined) {
+    payload.availableToolCount = availableToolCount
+  }
+  if (toolUseCount !== undefined) {
+    payload.toolUseCount = toolUseCount
+  }
+
+  return payload
+}
+
+export function countToolUsesInMessage(message: Message): number {
+  if (message.type !== 'assistant') {
+    return 0
+  }
+
+  const content = message.message?.content
+  if (!Array.isArray(content)) {
+    return 0
+  }
+
+  return content.filter(
+    block =>
+      typeof block === 'object' &&
+      block !== null &&
+      'type' in block &&
+      block.type === 'tool_use',
+  ).length
+}
+
+function summarizePromptMessages(messages: Message[]): Record<string, unknown> {
+  let textCharCount = 0
+  let textPreview = ''
+
+  for (const message of messages) {
+    for (const text of extractTextParts(message)) {
+      textCharCount += text.length
+      if (textPreview.length < PROMPT_PREVIEW_CHARS) {
+        const remaining = PROMPT_PREVIEW_CHARS - textPreview.length
+        textPreview += text.slice(0, remaining)
+      }
+    }
+  }
+
+  const summary: Record<string, unknown> = {
+    messageCount: messages.length,
+    textCharCount,
+  }
+
+  if (textPreview.length > 0) {
+    summary.textPreview = textPreview
+  }
+
+  return summary
+}
+
+function extractTextParts(message: Message): string[] {
+  if (message.type !== 'user' && message.type !== 'assistant') {
+    return []
+  }
+
+  const content = message.message?.content
+
+  if (typeof content === 'string') {
+    return [content]
+  }
+
+  if (!Array.isArray(content)) {
+    return []
+  }
+
+  const textParts: string[] = []
+  for (const block of content) {
+    if (
+      typeof block === 'object' &&
+      block !== null &&
+      'type' in block &&
+      block.type === 'text' &&
+      'text' in block &&
+      typeof block.text === 'string'
+    ) {
+      textParts.push(block.text)
+    }
+  }
+
+  return textParts
+}
 
 /**
  * Type guard to check if a message from query() is a recordable Message type.
@@ -772,6 +939,34 @@ export async function* runAgent({
     agentToolUseContext.langfuseTrace = subTrace
   }
 
+  const traceAgentName = agentDefinition.filename ?? agentDefinition.agentType
+  const traceParentToolUseId = toolUseContext.toolUseId
+  const traceParentAgentId = toolUseContext.agentId
+  const traceStartedAt = Date.now()
+  let traceStatus: SubagentStatus = 'completed'
+  let traceFinalMessageCount = 0
+  let traceToolUseCount = 0
+
+  if (feature('HARNESS_TRACE')) {
+    const traceMode = getTraceMode()
+    if (traceMode === 'learn' || traceMode === 'full') {
+      emitTrace({
+        parentId: traceParentToolUseId ?? traceParentAgentId,
+        source: 'subagent',
+        type: 'subagent.started',
+        payload: buildSubagentStartedTracePayload({
+          agentType: agentDefinition.agentType,
+          agentName: traceAgentName,
+          agentId,
+          parentToolUseId: traceParentToolUseId,
+          parentAgentId: traceParentAgentId,
+          mode: traceMode,
+          promptMessages: initialMessages,
+        }),
+      })
+    }
+  }
+
   try {
     for await (const message of query({
       messages: initialMessages,
@@ -818,6 +1013,8 @@ export async function* runAgent({
       }
 
       if (isRecordableMessage(message)) {
+        traceFinalMessageCount += 1
+        traceToolUseCount += countToolUsesInMessage(message)
         // Record only the new message with correct parent (O(1) per message)
         await recordSidechainTranscript(
           [message],
@@ -841,7 +1038,29 @@ export async function* runAgent({
     if (isBuiltInAgent(agentDefinition) && agentDefinition.callback) {
       agentDefinition.callback()
     }
+  } catch (error) {
+    traceStatus = error instanceof AbortError ? 'aborted' : 'error'
+    throw error
   } finally {
+    if (feature('HARNESS_TRACE')) {
+      emitTrace({
+        parentId: traceParentToolUseId ?? traceParentAgentId,
+        source: 'subagent',
+        type: 'subagent.ended',
+        payload: buildSubagentEndedTracePayload({
+          agentType: agentDefinition.agentType,
+          agentName: traceAgentName,
+          agentId,
+          parentToolUseId: traceParentToolUseId,
+          parentAgentId: traceParentAgentId,
+          status: traceStatus,
+          durationMs: Date.now() - traceStartedAt,
+          finalMessageCount: traceFinalMessageCount,
+          availableToolCount: allTools.length,
+          toolUseCount: traceToolUseCount,
+        }),
+      })
+    }
     // End Langfuse sub-agent trace (no-op if not configured)
     endTrace(subTrace)
     // Clean up agent-specific MCP servers (runs on normal completion, abort, or error)

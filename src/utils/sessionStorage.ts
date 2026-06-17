@@ -34,6 +34,7 @@ import { builtInCommandNames } from '../commands.js'
 import { COMMAND_NAME_TAG, TICK_TAG } from '../constants/xml.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import * as sessionIngress from '../services/api/sessionIngress.js'
+import { emitTrace } from '../trace/bus.js'
 import { REPL_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/REPLTool/constants.js'
 import {
   type AgentId,
@@ -665,6 +666,7 @@ class Project {
 
       let content = ''
       const resolvers: Array<() => void> = []
+      const tracedEntries: Array<{ entry: Entry; byteCount: number }> = []
 
       for (const { entry, resolve } of batch) {
         const line = jsonStringify(entry) + '\n'
@@ -672,19 +674,38 @@ class Project {
         if (content.length + line.length >= this.MAX_CHUNK_BYTES) {
           // Flush chunk and resolve its entries before starting a new one
           await this.appendToFile(filePath, content)
+          for (const tracedEntry of tracedEntries) {
+            emitTranscriptAppendTrace(
+              filePath,
+              tracedEntry.entry,
+              tracedEntry.byteCount,
+            )
+          }
           for (const r of resolvers) {
             r()
           }
           resolvers.length = 0
+          tracedEntries.length = 0
           content = ''
         }
 
         content += line
+        tracedEntries.push({
+          entry,
+          byteCount: Buffer.byteLength(line, 'utf8'),
+        })
         resolvers.push(resolve)
       }
 
       if (content.length > 0) {
         await this.appendToFile(filePath, content)
+        for (const tracedEntry of tracedEntries) {
+          emitTranscriptAppendTrace(
+            filePath,
+            tracedEntry.entry,
+            tracedEntry.byteCount,
+          )
+        }
         for (const r of resolvers) {
           r()
         }
@@ -2619,6 +2640,43 @@ function appendEntryToFile(
   } catch {
     fs.mkdirSync(dirname(fullPath), { mode: 0o700 })
     fs.appendFileSync(fullPath, line, { mode: 0o600 })
+  }
+  emitTranscriptAppendTrace(fullPath, entry, Buffer.byteLength(line, 'utf8'))
+}
+
+export function appendTranscriptEntryForTesting(
+  fullPath: string,
+  entry: Record<string, unknown>,
+): void {
+  appendEntryToFile(fullPath, entry)
+}
+
+function emitTranscriptAppendTrace(
+  fullPath: string,
+  entry: Record<string, unknown>,
+  byteCount: number,
+): void {
+  if (feature('HARNESS_TRACE')) {
+    const payload: Record<string, unknown> = {
+      path: fullPath,
+      byteCount,
+    }
+
+    if (typeof entry.type === 'string') {
+      payload.entryType = entry.type
+    }
+    if (typeof entry.uuid === 'string') {
+      payload.messageUuid = entry.uuid
+    }
+    if (typeof entry.isSidechain === 'boolean') {
+      payload.isSidechain = entry.isSidechain
+    }
+
+    emitTrace({
+      source: 'transcript',
+      type: 'transcript.appended',
+      payload,
+    })
   }
 }
 
