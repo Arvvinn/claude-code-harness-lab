@@ -310,6 +310,17 @@ if (feature('HARNESS_TRACE')) {
           call => call.self !== generator && call.value === returnValue,
         ),
       ).toBe(true)
+
+      await flushTraceForTesting()
+
+      const events = readTraceEvents('session-query-direct-return')
+      const turnEndEvent = events.find(event => event.type === 'turn.end')
+
+      expect(turnEndEvent?.payload).toMatchObject({
+        aborted: true,
+        resultReason: 'aborted_streaming',
+        stopReason: 'aborted_streaming',
+      })
     })
 
     test('counts synthetic assistant error messages in direct query turn end metadata', async () => {

@@ -237,6 +237,29 @@ function getAutonomyTurnOutcome(params: {
   }
 }
 
+function isTraceReturnedTerminal(value: unknown): value is Terminal {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const reason = (value as Record<string, unknown>).reason
+  switch (reason) {
+    case 'completed':
+    case 'blocking_limit':
+    case 'image_error':
+    case 'model_error':
+    case 'aborted_streaming':
+    case 'aborted_tools':
+    case 'prompt_too_long':
+    case 'stop_hook_prevented':
+    case 'hook_stopped':
+    case 'max_turns':
+      return true
+    default:
+      return false
+  }
+}
+
 function getTraceMessageTextCharCount(messages: Message[]): number {
   let inputChars = 0
 
@@ -371,6 +394,7 @@ export async function* query(
   // inside the HARNESS_TRACE guard; when the feature is off it remains unset.
   let harnessTraceOwner: { turnId: string; startedAt: number } | undefined
   let harnessTraceLoopMetadata: HarnessTraceQueryLoopMetadata | undefined
+  let harnessTraceReturnedTerminal: Terminal | undefined
   if (feature('HARNESS_TRACE')) {
     let traceTurnId = params.traceTurnId
     if (isTraceSessionActive()) {
@@ -492,7 +516,13 @@ export async function* query(
           return result
         },
         async return(value: Terminal | PromiseLike<Terminal>) {
+          if (isTraceReturnedTerminal(value)) {
+            harnessTraceReturnedTerminal = value
+          }
           const result = await loop.return(value)
+          if (result.done && isTraceReturnedTerminal(result.value)) {
+            harnessTraceReturnedTerminal = result.value
+          }
           countTraceResult(result)
           return result
         },
@@ -514,19 +544,20 @@ export async function* query(
   } finally {
     if (feature('HARNESS_TRACE')) {
       if (harnessTraceOwner !== undefined) {
+        const traceTerminal = terminal ?? harnessTraceReturnedTerminal
         const isAborted =
           paramsForQuery.toolUseContext.abortController.signal.aborted ||
-          terminal?.reason === 'aborted_streaming' ||
-          terminal?.reason === 'aborted_tools'
-        const isError = didThrow || terminal?.reason === 'model_error'
+          traceTerminal?.reason === 'aborted_streaming' ||
+          traceTerminal?.reason === 'aborted_tools'
+        const isError = didThrow || traceTerminal?.reason === 'model_error'
         const errorName =
           didThrow && thrownError instanceof Error
             ? thrownError.name
             : didThrow
               ? typeof thrownError
-              : terminal?.reason === 'model_error' &&
-                  terminal.error instanceof Error
-                ? terminal.error.name
+              : traceTerminal?.reason === 'model_error' &&
+                  traceTerminal.error instanceof Error
+                ? traceTerminal.error.name
                 : undefined
 
         emitTrace({
@@ -535,11 +566,11 @@ export async function* query(
           turnId: harnessTraceOwner.turnId,
           payload: {
             durationMs: Date.now() - harnessTraceOwner.startedAt,
-            success: !didThrow && terminal?.reason === 'completed',
+            success: !didThrow && traceTerminal?.reason === 'completed',
             error: isError,
             aborted: isAborted,
-            resultReason: terminal?.reason ?? (didThrow ? 'thrown' : null),
-            stopReason: terminal?.reason ?? null,
+            resultReason: traceTerminal?.reason ?? (didThrow ? 'thrown' : null),
+            stopReason: traceTerminal?.reason ?? null,
             finalMessageCount:
               harnessTraceLoopMetadata?.finalMessageCount ??
               paramsForQuery.messages.length,
