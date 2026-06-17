@@ -29,7 +29,7 @@ describe('query trace delegation invariants', () => {
     const querySource = readFileSync(
       new URL('../../query.ts', import.meta.url),
       'utf8',
-    )
+    ).replace(/\r\n/g, '\n')
 
     const guardedBranchStart = querySource.indexOf(
       'if (harnessTraceLoopMetadata !== undefined) {',
