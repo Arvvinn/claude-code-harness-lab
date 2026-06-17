@@ -450,6 +450,10 @@ export async function* query(
       paramsForQuery = {
         ...paramsWithTrace,
         traceTurnId,
+        toolUseContext: {
+          ...paramsWithTrace.toolUseContext,
+          traceTurnId,
+        },
       }
     }
   }

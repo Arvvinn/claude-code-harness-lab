@@ -1,3 +1,4 @@
+import { feature } from 'bun:bundle'
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import {
   createUserMessage,
@@ -12,6 +13,7 @@ import { createChildAbortController } from '../../utils/abortController.js'
 import { runToolUse } from './toolExecution.js'
 import { createToolBatchSpan, endToolBatchSpan } from '../langfuse/index.js'
 import type { LangfuseSpan } from '../langfuse/index.js'
+import { emitTrace } from '../../trace/bus.js'
 
 type MessageUpdate = {
   message?: Message
@@ -26,11 +28,29 @@ type TrackedTool = {
   assistantMessage: AssistantMessage
   status: ToolStatus
   isConcurrencySafe: boolean
+  queueTraceEmitted?: boolean
+  cancelTraceEmitted?: boolean
   promise?: Promise<void>
   results?: Message[]
   // Progress messages are stored separately and yielded immediately
   pendingProgress: Message[]
   contextModifiers?: Array<(context: ToolUseContext) => ToolUseContext>
+}
+
+function buildStreamingToolTracePayload(
+  toolUseId: string,
+  toolName: string,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    toolUseId,
+    toolName,
+    ...payload,
+  }
+}
+
+export const streamingToolTraceInternals = {
+  buildStreamingToolTracePayload,
 }
 
 /**
@@ -71,6 +91,13 @@ export class StreamingToolExecutor {
    * TrackedTool objects (each holding assistantMessage, results, pendingProgress).
    */
   discard(): void {
+    if (feature('HARNESS_TRACE')) {
+      for (const tool of this.tools) {
+        if (tool.status !== 'yielded') {
+          this.emitCancelledTrace(tool, 'streaming_fallback')
+        }
+      }
+    }
     this.discarded = true
     // Abort running tool subprocesses (Bash spawns, etc.) so they don't
     // continue producing results after the executor is replaced.
@@ -100,6 +127,18 @@ export class StreamingToolExecutor {
           langfuseBatchSpan: this.turnSpan,
         }
       }
+    }
+    if (feature('HARNESS_TRACE')) {
+      this.emitToolTrace(
+        assistantMessage,
+        block.id,
+        block.name,
+        'tool.detected',
+        {
+          status: 'detected',
+          durationMs: 0,
+        },
+      )
     }
     const toolDefinition = findToolByName(this.toolDefinitions, block.name)
     if (!toolDefinition) {
@@ -171,6 +210,9 @@ export class StreamingToolExecutor {
       if (this.canExecuteTool(tool.isConcurrencySafe)) {
         await this.executeTool(tool)
       } else {
+        if (feature('HARNESS_TRACE')) {
+          this.emitQueuedTrace(tool, 'execution_slot_unavailable')
+        }
         // Can't execute this tool yet, and since we need to maintain order for non-concurrent tools, stop here
         if (!tool.isConcurrencySafe) break
       }
@@ -291,6 +333,18 @@ export class StreamingToolExecutor {
    */
   private async executeTool(tool: TrackedTool): Promise<void> {
     tool.status = 'executing'
+    if (feature('HARNESS_TRACE')) {
+      this.emitToolTrace(
+        tool.assistantMessage,
+        tool.id,
+        tool.block.name,
+        'tool.started',
+        {
+          status: 'started',
+          durationMs: 0,
+        },
+      )
+    }
     this.toolUseContext.setInProgressToolUseIDs(prev =>
       new Set(prev).add(tool.id),
     )
@@ -304,6 +358,9 @@ export class StreamingToolExecutor {
       // If already aborted (by error or user), generate synthetic error block instead of running the tool
       const initialAbortReason = this.getAbortReason(tool)
       if (initialAbortReason) {
+        if (feature('HARNESS_TRACE')) {
+          this.emitCancelledTrace(tool, initialAbortReason)
+        }
         messages.push(
           this.createSyntheticErrorMessage(
             tool.id,
@@ -361,6 +418,9 @@ export class StreamingToolExecutor {
         // Only add the synthetic error if THIS tool didn't produce the error.
         const abortReason = this.getAbortReason(tool)
         if (abortReason && !thisToolErrored) {
+          if (feature('HARNESS_TRACE')) {
+            this.emitCancelledTrace(tool, abortReason)
+          }
           messages.push(
             this.createSyntheticErrorMessage(
               tool.id,
@@ -545,6 +605,64 @@ export class StreamingToolExecutor {
    */
   getUpdatedContext(): ToolUseContext {
     return this.toolUseContext
+  }
+
+  private emitToolTrace(
+    assistantMessage: AssistantMessage,
+    toolUseId: string,
+    toolName: string,
+    type: 'tool.detected' | 'tool.queued' | 'tool.started' | 'tool.cancelled',
+    payload: Record<string, unknown>,
+  ): void {
+    emitTrace({
+      source: 'tool',
+      type,
+      turnId: this.toolUseContext.traceTurnId,
+      parentId: assistantMessage.message.id as string | undefined,
+      payload: buildStreamingToolTracePayload(toolUseId, toolName, payload),
+    })
+  }
+
+  private emitQueuedTrace(
+    tool: TrackedTool,
+    queueReason: 'execution_slot_unavailable',
+  ): void {
+    if (tool.queueTraceEmitted) {
+      return
+    }
+    tool.queueTraceEmitted = true
+    this.emitToolTrace(
+      tool.assistantMessage,
+      tool.id,
+      tool.block.name,
+      'tool.queued',
+      {
+        status: 'queued',
+        queueReason,
+        durationMs: 0,
+      },
+    )
+  }
+
+  private emitCancelledTrace(
+    tool: TrackedTool,
+    reason: 'sibling_error' | 'user_interrupted' | 'streaming_fallback',
+  ): void {
+    if (tool.cancelTraceEmitted) {
+      return
+    }
+    tool.cancelTraceEmitted = true
+    this.emitToolTrace(
+      tool.assistantMessage,
+      tool.id,
+      tool.block.name,
+      'tool.cancelled',
+      {
+        status: 'cancelled',
+        reason,
+        durationMs: 0,
+      },
+    )
   }
 }
 

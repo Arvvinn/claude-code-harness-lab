@@ -51,6 +51,7 @@ import {
 import { getAllBaseTools } from '../../tools.js'
 import type { HookProgress } from '../../types/hooks.js'
 import { recordToolObservation } from '../langfuse/index.js'
+import { emitTrace, getTraceMode } from '../../trace/bus.js'
 import type {
   AssistantMessage,
   AttachmentMessage,
@@ -361,6 +362,159 @@ function getMcpServerBaseUrlFromToolName(
     return undefined
   }
   return getLoggingSafeMcpBaseUrl(serverConnection.config)
+}
+
+function getTraceParentId(
+  assistantMessage: AssistantMessage,
+): string | undefined {
+  return assistantMessage.message.id as string | undefined
+}
+
+function emitToolLifecycleTrace(
+  toolUseContext: ToolUseContext,
+  assistantMessage: AssistantMessage,
+  type:
+    | 'tool.started'
+    | 'tool.permission_result'
+    | 'tool.result'
+    | 'tool.error'
+    | 'hook.started'
+    | 'hook.result',
+  toolName: string,
+  toolUseId: string,
+  payload: Record<string, unknown>,
+): void {
+  emitTrace({
+    source: type.startsWith('hook.') ? 'hook' : 'tool',
+    type,
+    turnId: toolUseContext.traceTurnId,
+    parentId: getTraceParentId(assistantMessage),
+    payload: {
+      toolName,
+      toolUseId,
+      ...payload,
+    },
+  })
+}
+
+function summarizePermissionDecisionSource(
+  reason: PermissionDecisionReason | undefined,
+): string {
+  if (!reason) {
+    return 'unknown'
+  }
+
+  switch (reason.type) {
+    case 'rule':
+      return `rule:${reason.rule.source}`
+    case 'hook':
+      return `hook:${reason.hookName}`
+    case 'permissionPromptTool':
+      return 'permissionPromptTool'
+    case 'mode':
+      return 'mode'
+    case 'classifier':
+      return `classifier:${reason.classifier}`
+    case 'subcommandResults':
+      return 'subcommandResults'
+    case 'asyncAgent':
+      return 'asyncAgent'
+    case 'sandboxOverride':
+      return 'sandboxOverride'
+    case 'workingDir':
+      return 'workingDir'
+    case 'safetyCheck':
+      return 'safetyCheck'
+    case 'other':
+      return 'other'
+    default: {
+      const _exhaustive: never = reason
+      return String(_exhaustive)
+    }
+  }
+}
+
+function summarizeTraceValueKind(value: unknown): string {
+  if (value === null) {
+    return 'null'
+  }
+  if (Array.isArray(value)) {
+    return 'array'
+  }
+  return typeof value
+}
+
+function classifyTraceToolError(error: unknown): 'cancelled' | 'non_retryable' {
+  if (error instanceof AbortError) {
+    return 'cancelled'
+  }
+  return 'non_retryable'
+}
+
+function getTraceErrorName(error: unknown): string {
+  if (error instanceof Error && error.name) {
+    return error.name
+  }
+  return 'UnknownError'
+}
+
+function getTraceErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message
+  }
+  return String(error)
+}
+
+function buildToolPermissionTracePayload(input: {
+  decision: 'allow' | 'deny' | 'ask'
+  permissionMode: string
+  reason: PermissionDecisionReason | undefined
+  durationMs: number
+}): Record<string, unknown> {
+  return {
+    decision: input.decision,
+    source: summarizePermissionDecisionSource(input.reason),
+    permissionMode: input.permissionMode,
+    durationMs: input.durationMs,
+  }
+}
+
+function buildToolResultTracePayload(input: {
+  durationMs: number
+  toolOutput: unknown
+  toolResultSizeBytes: number
+  traceMode: 'off' | 'learn' | 'full'
+}): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    status: 'ok',
+    ok: true,
+    durationMs: input.durationMs,
+    resultKind: summarizeTraceValueKind(input.toolOutput),
+    toolResultSizeBytes: input.toolResultSizeBytes,
+  }
+  if (input.traceMode === 'full') {
+    payload.resultPayload = input.toolOutput
+  }
+  return payload
+}
+
+function buildToolErrorTracePayload(input: {
+  durationMs: number
+  error: unknown
+}): Record<string, unknown> {
+  return {
+    errorName: getTraceErrorName(input.error),
+    message: getTraceErrorMessage(input.error),
+    classification: classifyTraceToolError(input.error),
+    durationMs: input.durationMs,
+  }
+}
+
+export const toolExecutionTraceInternals = {
+  buildToolPermissionTracePayload,
+  buildToolResultTracePayload,
+  buildToolErrorTracePayload,
+  summarizePermissionDecisionSource,
 }
 
 export async function* runToolUse(
@@ -839,6 +993,19 @@ async function checkPermissionsAndCallTool(
   let hookPermissionResult: PermissionResult | undefined
   const preToolHookInfos: StopHookInfo[] = []
   const preToolHookStart = Date.now()
+  if (feature('HARNESS_TRACE')) {
+    emitToolLifecycleTrace(
+      toolUseContext,
+      assistantMessage,
+      'hook.started',
+      tool.name,
+      toolUseID,
+      {
+        hookEvent: 'PreToolUse',
+        durationMs: 0,
+      },
+    )
+  }
   for await (const result of runPreToolUseHooks(
     toolUseContext,
     tool,
@@ -892,6 +1059,21 @@ async function checkPermissionsAndCallTool(
           'pre_tool_hook_duration_ms',
           Date.now() - preToolHookStart,
         )
+        if (feature('HARNESS_TRACE')) {
+          emitToolLifecycleTrace(
+            toolUseContext,
+            assistantMessage,
+            'hook.result',
+            tool.name,
+            toolUseID,
+            {
+              hookEvent: 'PreToolUse',
+              status: 'stopped',
+              durationMs: Date.now() - preToolHookStart,
+              stopReason: stopReason ?? null,
+            },
+          )
+        }
         resultingMessages.push({
           message: createUserMessage({
             content: [createToolResultStopMessage(toolUseID)],
@@ -903,6 +1085,20 @@ async function checkPermissionsAndCallTool(
     }
   }
   const preToolHookDurationMs = Date.now() - preToolHookStart
+  if (feature('HARNESS_TRACE')) {
+    emitToolLifecycleTrace(
+      toolUseContext,
+      assistantMessage,
+      'hook.result',
+      tool.name,
+      toolUseID,
+      {
+        hookEvent: 'PreToolUse',
+        status: 'completed',
+        durationMs: preToolHookDurationMs,
+      },
+    )
+  }
   getStatsStore()?.observe('pre_tool_hook_duration_ms', preToolHookDurationMs)
   if (preToolHookDurationMs >= SLOW_PHASE_LOG_THRESHOLD_MS) {
     logForDebugging(
@@ -972,6 +1168,21 @@ async function checkPermissionsAndCallTool(
   const permissionDecision = resolved.decision
   processedInput = resolved.input
   const permissionDurationMs = Date.now() - permissionStart
+  if (feature('HARNESS_TRACE')) {
+    emitToolLifecycleTrace(
+      toolUseContext,
+      assistantMessage,
+      'tool.permission_result',
+      tool.name,
+      toolUseID,
+      buildToolPermissionTracePayload({
+        decision: permissionDecision.behavior,
+        reason: permissionDecision.decisionReason,
+        permissionMode,
+        durationMs: permissionDurationMs,
+      }),
+    )
+  }
   // In auto mode, canUseTool awaits the classifier (side_query) — if that's
   // slow the collapsed view shows "Running…" with no (Ns) tick since
   // bash_progress hasn't started yet. Auto-only: in default mode this timer
@@ -1218,6 +1429,19 @@ async function checkPermissionsAndCallTool(
   startToolExecutionSpan()
 
   const startTime = Date.now()
+  if (feature('HARNESS_TRACE')) {
+    emitToolLifecycleTrace(
+      toolUseContext,
+      assistantMessage,
+      'tool.started',
+      tool.name,
+      toolUseID,
+      {
+        status: 'started',
+        durationMs: 0,
+      },
+    )
+  }
 
   startSessionActivity('tool_exec')
   // If processedInput still points at the backfill clone, no hook/permission
@@ -1555,6 +1779,19 @@ async function checkPermissionsAndCallTool(
 
     const postToolHookInfos: StopHookInfo[] = []
     const postToolHookStart = Date.now()
+    if (feature('HARNESS_TRACE')) {
+      emitToolLifecycleTrace(
+        toolUseContext,
+        assistantMessage,
+        'hook.started',
+        tool.name,
+        toolUseID,
+        {
+          hookEvent: 'PostToolUse',
+          durationMs: 0,
+        },
+      )
+    }
     for await (const hookResult of runPostToolUseHooks(
       toolUseContext,
       tool,
@@ -1605,6 +1842,20 @@ async function checkPermissionsAndCallTool(
       }
     }
     const postToolHookDurationMs = Date.now() - postToolHookStart
+    if (feature('HARNESS_TRACE')) {
+      emitToolLifecycleTrace(
+        toolUseContext,
+        assistantMessage,
+        'hook.result',
+        tool.name,
+        toolUseID,
+        {
+          hookEvent: 'PostToolUse',
+          status: 'completed',
+          durationMs: postToolHookDurationMs,
+        },
+      )
+    }
     if (postToolHookDurationMs >= SLOW_PHASE_LOG_THRESHOLD_MS) {
       logForDebugging(
         `Slow PostToolUse hooks: ${postToolHookDurationMs}ms for ${tool.name} (${postToolHookInfos.length} hooks)`,
@@ -1659,6 +1910,21 @@ async function checkPermissionsAndCallTool(
     // Yield the remaining hook results after the other messages are sent
     for (const hookResult of hookResults) {
       resultingMessages.push(hookResult)
+    }
+    if (feature('HARNESS_TRACE')) {
+      emitToolLifecycleTrace(
+        toolUseContext,
+        assistantMessage,
+        'tool.result',
+        tool.name,
+        toolUseID,
+        buildToolResultTracePayload({
+          durationMs,
+          toolOutput,
+          toolResultSizeBytes,
+          traceMode: getTraceMode(),
+        }),
+      )
     }
     return resultingMessages
   } catch (error) {
@@ -1775,6 +2041,19 @@ async function checkPermissionsAndCallTool(
       })
     }
     const content = formatError(error)
+    if (feature('HARNESS_TRACE')) {
+      emitToolLifecycleTrace(
+        toolUseContext,
+        assistantMessage,
+        'tool.error',
+        tool.name,
+        toolUseID,
+        buildToolErrorTracePayload({
+          error,
+          durationMs,
+        }),
+      )
+    }
 
     // Determine if this was a user interrupt
     const isInterrupt = error instanceof AbortError
@@ -1783,6 +2062,20 @@ async function checkPermissionsAndCallTool(
     const hookMessages: MessageUpdateLazy<
       AttachmentMessage | ProgressMessage<HookProgress>
     >[] = []
+    const postFailureHookStart = Date.now()
+    if (feature('HARNESS_TRACE')) {
+      emitToolLifecycleTrace(
+        toolUseContext,
+        assistantMessage,
+        'hook.started',
+        tool.name,
+        toolUseID,
+        {
+          hookEvent: 'PostToolUseFailure',
+          durationMs: 0,
+        },
+      )
+    }
     for await (const hookResult of runPostToolUseFailureHooks(
       toolUseContext,
       tool,
@@ -1796,6 +2089,20 @@ async function checkPermissionsAndCallTool(
       mcpServerBaseUrl,
     )) {
       hookMessages.push(hookResult)
+    }
+    if (feature('HARNESS_TRACE')) {
+      emitToolLifecycleTrace(
+        toolUseContext,
+        assistantMessage,
+        'hook.result',
+        tool.name,
+        toolUseID,
+        {
+          hookEvent: 'PostToolUseFailure',
+          status: 'completed',
+          durationMs: Date.now() - postFailureHookStart,
+        },
+      )
     }
 
     return [
