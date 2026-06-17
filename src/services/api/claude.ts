@@ -278,7 +278,7 @@ function buildAPIRequestTracePayload(
     clientRequestId?: string
     previousRequestId?: string
     provider: string
-    querySource: QuerySource
+    querySource?: QuerySource
   },
 ): Record<string, unknown> {
   const request = params as Record<string, unknown>
@@ -581,6 +581,29 @@ function removeUndefinedTraceFields(
   return Object.fromEntries(
     Object.entries(payload).filter(([, value]) => value !== undefined),
   )
+}
+
+type ClaudeAPITraceEvent = {
+  source: 'api'
+  type:
+    | 'api.request_built'
+    | 'api.stream_event'
+    | 'api.assistant_message'
+    | 'api.response_completed'
+    | 'api.error'
+    | 'api.retry'
+  payload: Record<string, unknown>
+}
+
+type ClaudeAPITraceEmitter = (event: ClaudeAPITraceEvent) => void
+
+export const claudeApiTraceInternals = {
+  buildAPIErrorTracePayload,
+  buildAPIRetryTracePayload,
+  buildAPIRequestTracePayload,
+  buildAPIResponseCompletedTracePayload,
+  buildAPIStreamEventTracePayload,
+  buildAssistantMessageTracePayload,
 }
 
 /**
@@ -1185,26 +1208,36 @@ export async function* executeNonStreamingRequest(
         source: clientOptions.source,
       }),
     async (anthropic, attempt, context) => {
-      const start = Date.now()
-      const retryParams = paramsFromContext(context)
-      captureRequest(retryParams)
-      onAttempt(attempt, start, retryParams.max_tokens)
-
-      const adjustedParams = adjustParamsForNonStreaming(
-        retryParams,
-        MAX_NON_STREAMING_TOKENS,
-      )
-
       try {
-        return await anthropic.beta.messages.create(
+        return await runNonStreamingRequestAttempt(
           {
-            ...adjustedParams,
-            model: normalizeModelStringForAPI(adjustedParams.model),
+            attempt,
+            previousRequestId: originatingRequestId ?? undefined,
+            provider: getAPIProvider(),
+            querySource: retryOptions.querySource,
           },
-          {
-            signal: retryOptions.signal,
-            timeout: fallbackTimeoutMs,
+          context,
+          paramsFromContext,
+          onAttempt,
+          captureRequest,
+          async adjustedParams => {
+            const response = await anthropic.beta.messages.create(
+              {
+                ...adjustedParams,
+                model: normalizeModelStringForAPI(adjustedParams.model),
+              },
+              {
+                signal: retryOptions.signal,
+                timeout: fallbackTimeoutMs,
+              },
+            )
+            return response as BetaMessage
           },
+          feature('HARNESS_TRACE')
+            ? event => {
+                emitTrace(event)
+              }
+            : undefined,
         )
       } catch (err) {
         // User aborts are not errors — re-throw immediately without logging
@@ -1239,16 +1272,85 @@ export async function* executeNonStreamingRequest(
       querySource: retryOptions.querySource,
     },
   )
+  return yield* yieldNonStreamingRetryMessages(
+    generator,
+    {
+      model: retryOptions.model,
+      provider: getAPIProvider(),
+      requestId: originatingRequestId ?? undefined,
+    },
+    feature('HARNESS_TRACE')
+      ? event => {
+          emitTrace(event)
+        }
+      : undefined,
+  )
+}
 
-  let e
+export async function runNonStreamingRequestAttempt(
+  input: {
+    attempt: number
+    clientRequestId?: string
+    previousRequestId?: string
+    provider: string
+    querySource?: QuerySource
+  },
+  context: RetryContext,
+  paramsFromContext: (context: RetryContext) => BetaMessageStreamParams,
+  onAttempt: (attempt: number, start: number, maxOutputTokens: number) => void,
+  captureRequest: (params: BetaMessageStreamParams) => void,
+  requestExecutor: (
+    adjustedParams: BetaMessageStreamParams,
+  ) => Promise<BetaMessage>,
+  emitTraceEvent?: ClaudeAPITraceEmitter,
+): Promise<BetaMessage> {
+  const start = Date.now()
+  const retryParams = paramsFromContext(context)
+  captureRequest(retryParams)
+  onAttempt(input.attempt, start, retryParams.max_tokens)
+
+  if (emitTraceEvent !== undefined) {
+    emitTraceEvent({
+      source: 'api',
+      type: 'api.request_built',
+      payload: buildAPIRequestTracePayload(retryParams, input),
+    })
+  }
+
+  const adjustedParams = adjustParamsForNonStreaming(
+    retryParams,
+    MAX_NON_STREAMING_TOKENS,
+  )
+
+  return await requestExecutor(adjustedParams)
+}
+
+export async function* yieldNonStreamingRetryMessages(
+  generator: AsyncGenerator<SystemAPIErrorMessage, BetaMessage>,
+  input: {
+    clientRequestId?: string
+    model: string
+    provider: string
+    requestId?: string
+  },
+  emitTraceEvent?: ClaudeAPITraceEmitter,
+): AsyncGenerator<SystemAPIErrorMessage, BetaMessage> {
+  let next
   do {
-    e = await generator.next()
-    if (!e.done && e.value.type === 'system') {
-      yield e.value
+    next = await generator.next()
+    if (!next.done && next.value.type === 'system') {
+      if (emitTraceEvent !== undefined) {
+        emitTraceEvent({
+          source: 'api',
+          type: 'api.retry',
+          payload: buildAPIRetryTracePayload(next.value, input),
+        })
+      }
+      yield next.value
     }
-  } while (!e.done)
+  } while (!next.done)
 
-  return e.value as BetaMessage
+  return next.value as BetaMessage
 }
 
 /**
