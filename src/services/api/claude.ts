@@ -388,6 +388,42 @@ function buildAssistantMessageTracePayload(
   })
 }
 
+function buildAPIResponseCompletedTracePayload(input: {
+  assistantMessageCount: number
+  attempt: number
+  clientRequestId?: string
+  didFallBackToNonStreaming: boolean
+  durationMs: number
+  durationMsIncludingRetries: number
+  model: string
+  previousRequestId?: string
+  provider: string
+  requestId?: string | null
+  requestMessageCount: number
+  status: 'success'
+  stopReason: BetaStopReason | null
+  ttftMs: number
+  usage: NonNullableUsage
+}): Record<string, unknown> {
+  return removeUndefinedTraceFields({
+    provider: input.provider,
+    model: input.model,
+    status: input.status,
+    attempt: input.attempt,
+    requestId: input.requestId,
+    clientRequestId: input.clientRequestId,
+    previousRequestId: input.previousRequestId,
+    durationMs: input.durationMs,
+    durationMsIncludingRetries: input.durationMsIncludingRetries,
+    ttftMs: input.ttftMs,
+    didFallBackToNonStreaming: input.didFallBackToNonStreaming,
+    assistantMessageCount: input.assistantMessageCount,
+    requestMessageCount: input.requestMessageCount,
+    stopReason: input.stopReason,
+    usage: summarizeUsageForTrace(input.usage),
+  })
+}
+
 function buildAPIRetryTracePayload(
   message: SystemAPIErrorMessage,
   input: {
@@ -2177,6 +2213,15 @@ async function* queryModel(
         captureAPIRequest(params, options.querySource) // Capture for bug reports
 
         maxOutputTokens = params.max_tokens
+
+        // Generate and track client request ID so timeouts (which return no
+        // server request ID) can still be correlated with server logs.
+        // First-party only - 3P providers don't log it (inc-4029 class).
+        clientRequestId =
+          getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()
+            ? randomUUID()
+            : undefined
+
         if (feature('HARNESS_TRACE')) {
           emitTrace({
             source: 'api',
@@ -2198,14 +2243,6 @@ async function* queryModel(
         if (!options.agentId) {
           headlessProfilerCheckpoint('api_request_sent')
         }
-
-        // Generate and track client request ID so timeouts (which return no
-        // server request ID) can still be correlated with server logs.
-        // First-party only — 3P providers don't log it (inc-4029 class).
-        clientRequestId =
-          getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()
-            ? randomUUID()
-            : undefined
 
         // Use raw stream instead of BetaMessageStream to avoid O(n²) partial JSON parsing
         // BetaMessageStream calls partialParse() on every input_json_delta, which we don't need
@@ -3420,6 +3457,34 @@ async function* queryModel(
   // limit) until getToolPermissionContext() resolves.
   const logMessageCount = messagesForAPI.length
   const logMessageTokens = tokenCountFromLastAPIResponse(messagesForAPI)
+  const responseModel =
+    (newMessages[0]?.message.model as string | undefined) ??
+    partialMessage?.model ??
+    options.model
+
+  if (feature('HARNESS_TRACE')) {
+    emitTrace({
+      source: 'api',
+      type: 'api.response_completed',
+      payload: buildAPIResponseCompletedTracePayload({
+        attempt: attemptNumber,
+        assistantMessageCount: newMessages.length,
+        clientRequestId,
+        didFallBackToNonStreaming,
+        durationMs: Date.now() - start,
+        durationMsIncludingRetries: Date.now() - startIncludingRetries,
+        model: responseModel,
+        previousRequestId,
+        provider: getAPIProvider(),
+        requestId: streamRequestId ?? null,
+        requestMessageCount: logMessageCount,
+        status: 'success',
+        stopReason,
+        ttftMs,
+        usage,
+      }),
+    })
+  }
 
   // Record LLM observation in Langfuse (no-op if not configured)
   recordLLMObservation(options.langfuseTrace ?? null, {
@@ -3442,10 +3507,7 @@ async function* queryModel(
 
   void options.getToolPermissionContext().then(permissionContext => {
     logAPISuccessAndDuration({
-      model:
-        (newMessages[0]?.message.model as string | undefined) ??
-        partialMessage?.model ??
-        options.model,
+      model: responseModel,
       preNormalizedModel: options.model,
       usage,
       start,
