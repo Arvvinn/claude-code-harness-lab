@@ -264,11 +264,288 @@ import {
   type RetryContext,
   withRetry,
 } from './withRetry.js'
+import { emitTrace } from '../../trace/bus.js'
 
 // Define a type that represents valid JSON values
 type JsonValue = string | number | boolean | null | JsonObject | JsonArray
 type JsonObject = { [key: string]: JsonValue }
 type JsonArray = JsonValue[]
+
+function buildAPIRequestTracePayload(
+  params: object,
+  input: {
+    attempt: number
+    clientRequestId?: string
+    previousRequestId?: string
+    provider: string
+    querySource: QuerySource
+  },
+): Record<string, unknown> {
+  const request = params as Record<string, unknown>
+  const outputConfig = getObjectFieldForTrace(request.output_config)
+
+  return removeUndefinedTraceFields({
+    provider: input.provider,
+    model: getStringFieldForTrace(request.model),
+    querySource: input.querySource,
+    attempt: input.attempt,
+    messageCount: getArrayLengthForTrace(request.messages),
+    toolCount: getArrayLengthForTrace(request.tools),
+    betaCount: getArrayLengthForTrace(request.betas),
+    maxTokens: getNumberFieldForTrace(request.max_tokens),
+    thinkingType: getNestedStringFieldForTrace(request.thinking, 'type'),
+    toolChoiceType: getNestedStringFieldForTrace(request.tool_choice, 'type'),
+    outputFormatType: getNestedStringFieldForTrace(
+      outputConfig?.format,
+      'type',
+    ),
+    effort: getStringFieldForTrace(outputConfig?.effort),
+    speed: getStringFieldForTrace(request.speed),
+    hasTemperature: typeof request.temperature === 'number',
+    clientRequestId: input.clientRequestId,
+    previousRequestId: input.previousRequestId,
+  })
+}
+
+function buildAPIStreamEventTracePayload(
+  event: BetaRawMessageStreamEvent,
+  input: {
+    attempt: number
+    clientRequestId?: string
+    elapsedMs: number
+    provider: string
+    requestId?: string | null
+    timeSincePreviousEventMs?: number
+  },
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = removeUndefinedTraceFields({
+    provider: input.provider,
+    eventType: event.type,
+    attempt: input.attempt,
+    requestId: input.requestId,
+    clientRequestId: input.clientRequestId,
+    elapsedMs: input.elapsedMs,
+    timeSincePreviousEventMs: input.timeSincePreviousEventMs,
+  })
+
+  switch (event.type) {
+    case 'message_start':
+      return {
+        ...payload,
+        messageId: event.message.id,
+        responseModel: event.message.model,
+        usage: summarizeUsageForTrace(event.message.usage),
+      }
+    case 'content_block_start':
+      return {
+        ...payload,
+        contentBlockIndex: event.index,
+        ...summarizeContentBlockForTrace(event.content_block),
+      }
+    case 'content_block_delta':
+      return {
+        ...payload,
+        contentBlockIndex: event.index,
+        deltaType: event.delta.type,
+      }
+    case 'content_block_stop':
+      return {
+        ...payload,
+        contentBlockIndex: event.index,
+      }
+    case 'message_delta':
+      return {
+        ...payload,
+        stopReason: event.delta.stop_reason,
+        usage: summarizeUsageForTrace(event.usage),
+      }
+    case 'message_stop':
+      return payload
+  }
+}
+
+function buildAssistantMessageTracePayload(
+  message: AssistantMessage,
+  input: {
+    attempt: number
+    durationMs: number
+    provider: string
+    requestId?: string | null
+  },
+): Record<string, unknown> {
+  return removeUndefinedTraceFields({
+    provider: input.provider,
+    model: message.message.model,
+    messageId: message.message.id,
+    requestId: input.requestId ?? message.requestId,
+    attempt: input.attempt,
+    durationMs: input.durationMs,
+    stopReason: message.message.stop_reason,
+    contentBlockCount: Array.isArray(message.message.content)
+      ? message.message.content.length
+      : undefined,
+    usage: summarizeUsageForTrace(message.message.usage),
+  })
+}
+
+function buildAPIRetryTracePayload(
+  message: SystemAPIErrorMessage,
+  input: {
+    clientRequestId?: string
+    model: string
+    provider: string
+    requestId?: string | null
+  },
+): Record<string, unknown> {
+  const apiError = message.error instanceof APIError ? message.error : undefined
+  const errorRecord = getObjectFieldForTrace(message.error)
+
+  return removeUndefinedTraceFields({
+    provider: input.provider,
+    model: input.model,
+    attempt: message.retryAttempt,
+    maxRetries: message.maxRetries,
+    retryInMs: message.retryInMs,
+    status: apiError?.status ?? getNumberFieldForTrace(errorRecord?.status),
+    errorName:
+      message.error instanceof Error
+        ? message.error.name
+        : getStringFieldForTrace(errorRecord?.name),
+    requestId:
+      input.requestId ??
+      apiError?.requestID ??
+      getStringFieldForTrace(errorRecord?.requestID),
+    clientRequestId: input.clientRequestId,
+  })
+}
+
+function buildAPIErrorTracePayload(
+  error: unknown,
+  input: {
+    attempt: number
+    clientRequestId?: string
+    didFallBackToNonStreaming?: boolean
+    durationMs: number
+    durationMsIncludingRetries: number
+    fallbackCause?: string
+    fallbackDisabled?: boolean
+    model: string
+    phase: string
+    provider: string
+    requestId?: string | null
+    willFallBackToNonStreaming?: boolean
+  },
+): Record<string, unknown> {
+  const apiError = error instanceof APIError ? error : undefined
+
+  return removeUndefinedTraceFields({
+    provider: input.provider,
+    model: input.model,
+    phase: input.phase,
+    attempt: input.attempt,
+    errorName: error instanceof Error ? error.name : typeof error,
+    status: apiError?.status,
+    requestId: input.requestId ?? getRequestIdFromAPIError(apiError),
+    clientRequestId: input.clientRequestId,
+    durationMs: input.durationMs,
+    durationMsIncludingRetries: input.durationMsIncludingRetries,
+    didFallBackToNonStreaming: input.didFallBackToNonStreaming,
+    willFallBackToNonStreaming: input.willFallBackToNonStreaming,
+    fallbackDisabled: input.fallbackDisabled,
+    fallbackCause: input.fallbackCause,
+  })
+}
+
+function summarizeUsageForTrace(
+  usage: unknown,
+): Record<string, unknown> | undefined {
+  const usageRecord = getObjectFieldForTrace(usage)
+
+  if (usageRecord === undefined) {
+    return undefined
+  }
+
+  const cacheCreation = getObjectFieldForTrace(usageRecord.cache_creation)
+  const serverToolUse = getObjectFieldForTrace(usageRecord.server_tool_use)
+
+  return removeUndefinedTraceFields({
+    inputTokens: getNumberFieldForTrace(usageRecord.input_tokens),
+    outputTokens: getNumberFieldForTrace(usageRecord.output_tokens),
+    cacheCreationInputTokens: getNumberFieldForTrace(
+      usageRecord.cache_creation_input_tokens,
+    ),
+    cacheReadInputTokens: getNumberFieldForTrace(
+      usageRecord.cache_read_input_tokens,
+    ),
+    webSearchRequests: getNumberFieldForTrace(
+      serverToolUse?.web_search_requests,
+    ),
+    webFetchRequests: getNumberFieldForTrace(serverToolUse?.web_fetch_requests),
+    cacheCreationEphemeral1hInputTokens: getNumberFieldForTrace(
+      cacheCreation?.ephemeral_1h_input_tokens,
+    ),
+    cacheCreationEphemeral5mInputTokens: getNumberFieldForTrace(
+      cacheCreation?.ephemeral_5m_input_tokens,
+    ),
+    serviceTier: getStringFieldForTrace(usageRecord.service_tier),
+  })
+}
+
+function summarizeContentBlockForTrace(
+  block: BetaContentBlock,
+): Record<string, unknown> {
+  const blockRecord = block as unknown as Record<string, unknown>
+
+  return removeUndefinedTraceFields({
+    contentBlockType: block.type,
+    contentBlockId: getStringFieldForTrace(blockRecord.id),
+    toolName: getStringFieldForTrace(blockRecord.name),
+  })
+}
+
+function getArrayLengthForTrace(value: unknown): number | undefined {
+  return Array.isArray(value) ? value.length : undefined
+}
+
+function getObjectFieldForTrace(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function getStringFieldForTrace(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function getNumberFieldForTrace(value: unknown): number | undefined {
+  return typeof value === 'number' ? value : undefined
+}
+
+function getNestedStringFieldForTrace(
+  value: unknown,
+  field: string,
+): string | undefined {
+  return getStringFieldForTrace(getObjectFieldForTrace(value)?.[field])
+}
+
+function getRequestIdFromAPIError(
+  error: APIError | undefined,
+): string | undefined {
+  return (
+    error?.requestID ??
+    (error?.error as { request_id?: string } | undefined)?.request_id
+  )
+}
+
+function removeUndefinedTraceFields(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(payload).filter(([, value]) => value !== undefined),
+  )
+}
 
 /**
  * Assemble the extra body parameters for the API request, based on the
@@ -1900,6 +2177,19 @@ async function* queryModel(
         captureAPIRequest(params, options.querySource) // Capture for bug reports
 
         maxOutputTokens = params.max_tokens
+        if (feature('HARNESS_TRACE')) {
+          emitTrace({
+            source: 'api',
+            type: 'api.request_built',
+            payload: buildAPIRequestTracePayload(params, {
+              attempt,
+              clientRequestId,
+              previousRequestId,
+              provider: getAPIProvider(),
+              querySource: options.querySource,
+            }),
+          })
+        }
 
         // Fire immediately before the fetch is dispatched. .withResponse() below
         // awaits until response headers arrive, so this MUST be before the await
@@ -1952,6 +2242,18 @@ async function* queryModel(
 
       // yield API error messages (the stream has a 'controller' property, error messages don't)
       if (!('controller' in e.value)) {
+        if (feature('HARNESS_TRACE')) {
+          emitTrace({
+            source: 'api',
+            type: 'api.retry',
+            payload: buildAPIRetryTracePayload(e.value, {
+              clientRequestId,
+              model: options.model,
+              provider: getAPIProvider(),
+              requestId: streamRequestId,
+            }),
+          })
+        }
         yield e.value
       }
     } while (!e.done)
@@ -2042,6 +2344,22 @@ async function* queryModel(
       for await (const part of stream) {
         resetStreamIdleTimer()
         const now = Date.now()
+        if (feature('HARNESS_TRACE')) {
+          const timeSincePreviousEventMs =
+            lastEventTime === null ? undefined : now - lastEventTime
+          emitTrace({
+            source: 'api',
+            type: 'api.stream_event',
+            payload: buildAPIStreamEventTracePayload(part, {
+              attempt: attemptNumber,
+              clientRequestId,
+              elapsedMs: now - start,
+              provider: getAPIProvider(),
+              requestId: streamRequestId,
+              timeSincePreviousEventMs,
+            }),
+          })
+        }
 
         // Detect and log streaming stalls (only after first event to avoid counting TTFB)
         if (lastEventTime !== null) {
@@ -2319,6 +2637,18 @@ async function* queryModel(
               ...(advisorModel && { advisorModel }),
             }
             newMessages.push(m)
+            if (feature('HARNESS_TRACE')) {
+              emitTrace({
+                source: 'api',
+                type: 'api.assistant_message',
+                payload: buildAssistantMessageTracePayload(m, {
+                  attempt: attemptNumber,
+                  durationMs: Date.now() - start,
+                  provider: getAPIProvider(),
+                  requestId: streamRequestId,
+                }),
+              })
+            }
             yield m
             break
           }
@@ -2597,6 +2927,26 @@ async function* queryModel(
           'tengu_disable_streaming_to_non_streaming_fallback',
           false,
         )
+      if (feature('HARNESS_TRACE')) {
+        emitTrace({
+          source: 'api',
+          type: 'api.error',
+          payload: buildAPIErrorTracePayload(streamingError, {
+            attempt: attemptNumber,
+            clientRequestId,
+            didFallBackToNonStreaming,
+            durationMs: Date.now() - start,
+            durationMsIncludingRetries: Date.now() - startIncludingRetries,
+            fallbackCause: streamIdleAborted ? 'watchdog' : 'other',
+            fallbackDisabled: disableFallback,
+            model: options.model,
+            phase: 'stream',
+            provider: getAPIProvider(),
+            requestId: streamRequestId,
+            willFallBackToNonStreaming: !disableFallback,
+          }),
+        })
+      }
 
       if (disableFallback) {
         logForDebugging(
@@ -2722,6 +3072,18 @@ async function* queryModel(
       }
       newMessages.push(m)
       fallbackMessage = m
+      if (feature('HARNESS_TRACE')) {
+        emitTrace({
+          source: 'api',
+          type: 'api.assistant_message',
+          payload: buildAssistantMessageTracePayload(m, {
+            attempt: attemptNumber,
+            durationMs: Date.now() - start,
+            provider: getAPIProvider(),
+            requestId: streamRequestId,
+          }),
+        })
+      }
       yield m
     } finally {
       clearStreamIdleTimers()
@@ -2752,6 +3114,25 @@ async function* queryModel(
       // request's ID from the error header instead.
       const failedRequestId =
         (errorFromRetry.originalError as APIError).requestID ?? 'unknown'
+      if (feature('HARNESS_TRACE')) {
+        emitTrace({
+          source: 'api',
+          type: 'api.error',
+          payload: buildAPIErrorTracePayload(errorFromRetry.originalError, {
+            attempt: attemptNumber,
+            clientRequestId,
+            didFallBackToNonStreaming,
+            durationMs: Date.now() - start,
+            durationMsIncludingRetries: Date.now() - startIncludingRetries,
+            fallbackCause: '404_stream_creation',
+            model: options.model,
+            phase: 'stream_creation',
+            provider: getAPIProvider(),
+            requestId: failedRequestId,
+            willFallBackToNonStreaming: true,
+          }),
+        })
+      }
       logForDebugging(
         'Streaming endpoint returned 404, falling back to non-streaming mode',
         { level: 'warn' },
@@ -2818,6 +3199,18 @@ async function* queryModel(
         }
         newMessages.push(m)
         fallbackMessage = m
+        if (feature('HARNESS_TRACE')) {
+          emitTrace({
+            source: 'api',
+            type: 'api.assistant_message',
+            payload: buildAssistantMessageTracePayload(m, {
+              attempt: attemptNumber,
+              durationMs: Date.now() - start,
+              provider: getAPIProvider(),
+              requestId: streamRequestId,
+            }),
+          })
+        }
         yield m
 
         // Continue to success logging below
@@ -2850,6 +3243,24 @@ async function* queryModel(
           (error instanceof APIError
             ? (error.error as { request_id?: string })?.request_id
             : undefined)
+        if (feature('HARNESS_TRACE')) {
+          emitTrace({
+            source: 'api',
+            type: 'api.error',
+            payload: buildAPIErrorTracePayload(error, {
+              attempt: attemptNumber,
+              clientRequestId,
+              didFallBackToNonStreaming,
+              durationMs: Date.now() - start,
+              durationMsIncludingRetries: Date.now() - startIncludingRetries,
+              fallbackCause: 'non_streaming_fallback',
+              model: errorModel,
+              phase: 'non_streaming_fallback',
+              provider: getAPIProvider(),
+              requestId,
+            }),
+          })
+        }
 
         logAPIError({
           error,
@@ -2906,6 +3317,23 @@ async function* queryModel(
         (error instanceof APIError
           ? (error.error as { request_id?: string })?.request_id
           : undefined)
+      if (feature('HARNESS_TRACE')) {
+        emitTrace({
+          source: 'api',
+          type: 'api.error',
+          payload: buildAPIErrorTracePayload(error, {
+            attempt: attemptNumber,
+            clientRequestId,
+            didFallBackToNonStreaming,
+            durationMs: Date.now() - start,
+            durationMsIncludingRetries: Date.now() - startIncludingRetries,
+            model: errorModel,
+            phase: 'request',
+            provider: getAPIProvider(),
+            requestId,
+          }),
+        })
+      }
 
       logAPIError({
         error,
