@@ -51,7 +51,16 @@ describe('query trace delegation invariants', () => {
     ).toContain('function isTraceCountableMessage')
     expect(
       querySource.slice(manualDelegationStart, nativeDelegationStart),
-    ).toContain('isTraceCountableMessage(yielded)')
+    ).toContain('const traceCountingLoop')
+    expect(
+      querySource.slice(manualDelegationStart, nativeDelegationStart),
+    ).toContain('return(value: Terminal | PromiseLike<Terminal>)')
+    expect(
+      querySource.slice(manualDelegationStart, nativeDelegationStart),
+    ).toContain('loop.return(value)')
+    expect(
+      querySource.slice(manualDelegationStart, nativeDelegationStart),
+    ).toContain('terminal = yield* traceCountingLoop')
   })
 })
 
@@ -233,6 +242,74 @@ if (feature('HARNESS_TRACE')) {
         finalMessageCount: 2,
       })
       expect(JSON.stringify(events)).not.toContain(rawPrompt)
+    })
+
+    test('forwards early consumer return values to the traced query loop', async () => {
+      startTraceSession({
+        sessionId: 'session-query-direct-return',
+        cwd: traceDir,
+        argv: ['claude'],
+      })
+
+      const deps = {
+        uuid: () => 'query-chain-id',
+        microcompact: async (messages: unknown[]) => ({ messages }),
+        autocompact: async () => ({
+          compactionResult: undefined,
+          consecutiveFailures: 0,
+        }),
+        callModel: async function* () {
+          yield createAssistantMessage()
+        },
+      }
+      const asyncGeneratorPrototype = Object.getPrototypeOf(
+        Object.getPrototypeOf((async function* () {})()),
+      ) as {
+        return: (value?: unknown) => Promise<IteratorResult<unknown, unknown>>
+      }
+      const originalReturn = asyncGeneratorPrototype.return
+      const returnCalls: Array<{ self: unknown; value: unknown }> = []
+
+      asyncGeneratorPrototype.return = function (
+        this: unknown,
+        value?: unknown,
+      ) {
+        returnCalls.push({ self: this, value })
+        return originalReturn.call(this, value)
+      }
+
+      const generator = query({
+        messages: [createUserMessage({ content: 'early return prompt' })],
+        systemPrompt: asSystemPrompt([]),
+        userContext: {},
+        systemContext: {},
+        canUseTool: async (_tool, input) => ({
+          behavior: 'allow',
+          updatedInput: input,
+        }),
+        toolUseContext: createToolUseContext(),
+        querySource: 'repl_main_thread',
+        deps: deps as never,
+      })
+      const returnValue: Terminal = { reason: 'aborted_streaming' }
+
+      try {
+        const first = await generator.next()
+        expect(first).toMatchObject({
+          done: false,
+          value: { type: 'stream_request_start' },
+        })
+
+        await generator.return(returnValue)
+      } finally {
+        asyncGeneratorPrototype.return = originalReturn
+      }
+
+      expect(
+        returnCalls.some(
+          call => call.self !== generator && call.value === returnValue,
+        ),
+      ).toBe(true)
     })
 
     test('counts synthetic assistant error messages in direct query turn end metadata', async () => {

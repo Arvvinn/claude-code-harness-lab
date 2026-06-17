@@ -327,16 +327,16 @@ type HarnessTraceQueryLoopMetadata = {
   finalMessageCount: number
 }
 
-export async function* query(
-  params: QueryParams,
-): AsyncGenerator<
+type QueryYield =
   | StreamEvent
   | RequestStartEvent
   | Message
   | TombstoneMessage
-  | ToolUseSummaryMessage,
-  Terminal
-> {
+  | ToolUseSummaryMessage
+
+export async function* query(
+  params: QueryParams,
+): AsyncGenerator<QueryYield, Terminal> {
   const consumedCommandUuids: string[] = []
   const consumedAutonomyCommands: QueuedCommand[] = []
 
@@ -464,29 +464,41 @@ export async function* query(
         consumedAutonomyCommands,
         harnessTraceLoopMetadata,
       )
-      let loopDone = false
-      let loopResult = await loop.next()
-      try {
-        while (!loopResult.done) {
-          const yielded = loopResult.value
-          if (isTraceCountableMessage(yielded)) {
+      const countTraceResult = (
+        result: IteratorResult<QueryYield, Terminal>,
+      ): void => {
+        if (!result.done) {
+          if (isTraceCountableMessage(result.value)) {
             harnessTraceLoopMetadata.finalMessageCount += 1
           }
-
-          try {
-            const nextInput = yield yielded
-            loopResult = await loop.next(nextInput)
-          } catch (yieldError) {
-            loopResult = await loop.throw(yieldError)
-          }
-        }
-        loopDone = true
-        terminal = loopResult.value
-      } finally {
-        if (!loopDone) {
-          await loop.return(undefined as unknown as Terminal)
         }
       }
+
+      const traceCountingLoop: AsyncGenerator<QueryYield, Terminal> = {
+        [Symbol.asyncIterator]() {
+          return this
+        },
+        async [Symbol.asyncDispose]() {
+          await loop[Symbol.asyncDispose]()
+        },
+        async next(value?: unknown) {
+          const result = await loop.next(value)
+          countTraceResult(result)
+          return result
+        },
+        async throw(error?: unknown) {
+          const result = await loop.throw(error)
+          countTraceResult(result)
+          return result
+        },
+        async return(value: Terminal | PromiseLike<Terminal>) {
+          const result = await loop.return(value)
+          countTraceResult(result)
+          return result
+        },
+      }
+
+      terminal = yield* traceCountingLoop
     } else {
       terminal = yield* queryLoop(
         paramsForQuery,
@@ -605,14 +617,7 @@ async function* queryLoop(
   consumedCommandUuids: string[],
   consumedAutonomyCommands: QueuedCommand[],
   harnessTraceLoopMetadata?: HarnessTraceQueryLoopMetadata,
-): AsyncGenerator<
-  | StreamEvent
-  | RequestStartEvent
-  | Message
-  | TombstoneMessage
-  | ToolUseSummaryMessage,
-  Terminal
-> {
+): AsyncGenerator<QueryYield, Terminal> {
   // Immutable params — never reassigned during the query loop.
   const {
     systemPrompt,
