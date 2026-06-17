@@ -175,11 +175,11 @@ describe('trace CLI', () => {
     expect(result.stdout).toContain(
       'User -> messages[] -> LLM -> stop_reason/tool_use decision -> tools -> append results -> loop back/return text',
     )
-    expect(result.stdout).toContain('\x1b[36m[USER]\x1b[0m')
     expect(result.stdout).toContain('[USER]')
     expect(result.stdout).toContain('explain the project')
     expect(result.stdout).toContain('[SYSTEM]')
-    expect(result.stdout).toContain('system prompt body')
+    expect(result.stdout).toContain('systemPrompt: collapsed 1 block')
+    expect(result.stdout).not.toContain('system prompt body')
     expect(result.stdout).toContain('[LLM]')
     expect(result.stdout).toContain('claude-test')
     expect(result.stdout).not.toContain('rawRequestParams')
@@ -192,6 +192,94 @@ describe('trace CLI', () => {
     expect(result.stdout).toContain('[TOOL]')
     expect(result.stdout).toContain('Read')
     expect(result.stdout).not.toContain('14:03:10 turn.start')
+  })
+
+  test('replay collapses noisy internal detail by default while raw preserves it', async () => {
+    const noisyStrings = [
+      'NOISY HOOK COMMAND SHOULD ONLY BE RAW',
+      'NOISY SKILL LIST SHOULD ONLY BE RAW',
+      'NOISY SYSTEM PROMPT SHOULD ONLY BE RAW',
+      'NOISY CLAUDE MD SHOULD ONLY BE RAW',
+      'NOISY GIT STATUS SHOULD ONLY BE RAW',
+      'NOISY OLD STRING SHOULD ONLY BE RAW',
+      'NOISY NEW STRING SHOULD ONLY BE RAW',
+    ]
+
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'attachment',
+              attachment: {
+                type: 'hook_success',
+                command: 'NOISY HOOK COMMAND SHOULD ONLY BE RAW',
+              },
+            },
+            {
+              type: 'attachment',
+              attachment: {
+                type: 'skill_listing',
+                content: 'NOISY SKILL LIST SHOULD ONLY BE RAW',
+              },
+            },
+            {
+              type: 'user',
+              message: { content: 'read README.md' },
+            },
+          ],
+          systemPrompt: [
+            {
+              type: 'text',
+              text: 'NOISY SYSTEM PROMPT SHOULD ONLY BE RAW',
+            },
+          ],
+          userContext: {
+            claudeMd: 'NOISY CLAUDE MD SHOULD ONLY BE RAW',
+          },
+          systemContext: {
+            gitStatus: 'NOISY GIT STATUS SHOULD ONLY BE RAW',
+          },
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-2',
+        sequence: 2,
+        type: 'tool.started',
+        source: 'tool',
+        payload: {
+          toolName: 'Edit',
+          toolInput: {
+            file_path:
+              'C:\\Users\\asuka\\.claude\\projects\\session-memory\\summary.md',
+            old_string: 'NOISY OLD STRING SHOULD ONLY BE RAW',
+            new_string: 'NOISY NEW STRING SHOULD ONLY BE RAW',
+          },
+        },
+      }),
+    )
+
+    const panel = await runTrace(['replay', 'session-1'])
+    const raw = await runTrace(['replay', 'session-1', '--raw'])
+
+    expect(panel.exitCode).toBe(0)
+    expect(panel.stdout).toContain('read README.md')
+    expect(panel.stdout).toContain('attachments/hooks=2 collapsed')
+    expect(panel.stdout).toContain('systemPrompt: collapsed 1 block')
+    expect(panel.stdout).toContain('input=collapsed')
+    for (const noisyString of noisyStrings) {
+      expect(panel.stdout).not.toContain(noisyString)
+    }
+
+    expect(raw.exitCode).toBe(0)
+    for (const noisyString of noisyStrings) {
+      expect(raw.stdout).toContain(noisyString)
+    }
   })
 
   test('replay --raw prints raw JSONL events', async () => {
