@@ -2,7 +2,15 @@ import { feature } from 'bun:bundle'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from 'bun:test'
 import {
   flushTraceForTesting,
   resetTraceForTesting,
@@ -27,6 +35,7 @@ if (feature('HARNESS_TRACE')) {
     afterEach(async () => {
       await flushTraceForTesting()
       resetTraceForTesting()
+      mock.restore()
 
       if (originalTraceDir === undefined) {
         delete process.env.CLAUDE_CODE_TRACE_DIR
@@ -78,6 +87,24 @@ if (feature('HARNESS_TRACE')) {
       expect(appendEvent?.payload).not.toHaveProperty('message')
       expect(typeof appendEvent?.payload.byteCount).toBe('number')
       expect(Number(appendEvent?.payload.byteCount)).toBeGreaterThan(0)
+    })
+
+    test('does not estimate transcript append bytes without an active trace session', async () => {
+      const { appendTranscriptEntryForTesting } = await import(
+        '../../utils/sessionStorage.js'
+      )
+      const byteLengthSpy = spyOn(Buffer, 'byteLength')
+
+      appendTranscriptEntryForTesting(join(traceDir, 'inactive.jsonl'), {
+        type: 'user',
+        uuid: '22222222-2222-4222-8222-222222222222',
+        message: {
+          role: 'user',
+          content: 'no active trace session',
+        },
+      })
+
+      expect(byteLengthSpy).not.toHaveBeenCalled()
     })
   })
 
