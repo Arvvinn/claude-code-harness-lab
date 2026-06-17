@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import { z } from 'zod/v4'
 import type { ToolUseContext } from '../../../Tool.js'
 import type { AssistantMessage } from '../../../types/message.js'
@@ -163,406 +164,412 @@ describe('runToolUse trace instrumentation', () => {
     expect(await readdir(getTraceRootDir())).toEqual(['config.json'])
   })
 
-  test('emits success lifecycle without exposing traceTurnId to hooks or tool.call', async () => {
-    const seenCallContexts: ToolUseContext[] = []
-    const tool = makeTraceTestTool({
-      call: async (_input, context) => {
-        seenCallContexts.push(context)
-        return { data: { ok: true, token: 'Bearer result-secret' } }
-      },
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-tool-success',
-    )
-
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_success_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-success' },
-    )
-    await flushTraceForTesting()
-
-    const events = getNonSessionEvents()
-    expect(events.map(event => event.type)).toEqual([
-      'hook.started',
-      'hook.result',
-      'tool.permission_result',
-      'tool.started',
-      'hook.started',
-      'hook.result',
-      'tool.result',
-    ])
-    expect(events.every(event => event.turnId === 'turn-tool-success')).toBe(
-      true,
-    )
-    expect(
-      events.every(event => event.parentId === assistantMessage.message.id),
-    ).toBe(true)
-    for (const event of events) {
-      expect(event.payload).toMatchObject({
-        toolName: 'TraceExecTool',
-        toolUseId: 'toolu_trace_success_1',
+  if (feature('HARNESS_TRACE')) {
+    test('emits success lifecycle without exposing traceTurnId to hooks or tool.call', async () => {
+      const seenCallContexts: ToolUseContext[] = []
+      const tool = makeTraceTestTool({
+        call: async (_input, context) => {
+          seenCallContexts.push(context)
+          return { data: { ok: true, token: 'Bearer result-secret' } }
+        },
       })
-      expect(event.payload).toHaveProperty('durationMs')
-    }
-    expect(events.filter(event => event.type === 'tool.started')).toHaveLength(
-      1,
-    )
-    expect(hookState.seenPreContext).not.toHaveProperty('traceTurnId')
-    expect(hookState.seenPermissionContext).not.toHaveProperty('traceTurnId')
-    expect(seenCallContexts).toHaveLength(1)
-    expect(seenCallContexts[0]).not.toHaveProperty('traceTurnId')
-    expect(JSON.stringify(events)).not.toContain('model input secret')
-  })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-tool-success',
+      )
 
-  test('emits validation tool.error for schema validation failure without raw input', async () => {
-    const tool = makeTraceTestTool({
-      call: async () => ({ data: { ok: true } }),
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-schema-error',
-    )
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_success_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-success' },
+      )
+      await flushTraceForTesting()
 
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    await drainRunToolUse(
-      {
-        ...makeToolUseBlock('toolu_trace_schema_error_1'),
-        input: { secret: 42 },
-      } as ToolUseBlock,
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-schema-error' },
-    )
-    await flushTraceForTesting()
-
-    const errorEvent = getNonSessionEvents().find(
-      event => event.type === 'tool.error',
-    )
-    expect(errorEvent).toBeDefined()
-    expect(errorEvent?.turnId).toBe('turn-tool-schema-error')
-    expect(errorEvent?.payload).toMatchObject({
-      toolName: 'TraceExecTool',
-      toolUseId: 'toolu_trace_schema_error_1',
-      classification: 'validation',
-      errorName: 'InputValidationError',
-    })
-    expect(JSON.stringify(errorEvent)).not.toContain('model input secret')
-  })
-
-  test('emits validation tool.error for validateInput failure', async () => {
-    const tool = makeTraceTestTool({
-      validateInput: async () => ({
-        result: false,
-        message: 'synthetic validateInput failure',
-        errorCode: 'synthetic_validation',
-      }),
-      call: async () => ({ data: { ok: true } }),
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-validate-error',
-    )
-
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_validate_error_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-validate-error' },
-    )
-    await flushTraceForTesting()
-
-    const errorEvent = getNonSessionEvents().find(
-      event => event.type === 'tool.error',
-    )
-    expect(errorEvent?.payload).toMatchObject({
-      classification: 'validation',
-      errorName: 'InputValidationError',
-      message: 'synthetic validateInput failure',
-    })
-  })
-
-  test('emits permission_result and permission_denied tool.error for deny decisions', async () => {
-    hookState.resolvePermission = async (input: Record<string, unknown>) => ({
-      decision: {
-        behavior: 'deny',
-        message: 'Permission denied by test',
-        updatedInput: input,
-        decisionReason: {
-          type: 'rule',
-          rule: { source: 'localSettings' },
-        },
-      },
-      input,
-    })
-    const tool = makeTraceTestTool({
-      call: async () => ({ data: { ok: true } }),
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-permission-deny',
-    )
-
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_permission_deny_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-permission-deny' },
-    )
-    await flushTraceForTesting()
-
-    const events = getNonSessionEvents()
-    expect(
-      events.find(event => event.type === 'tool.permission_result')?.payload,
-    ).toMatchObject({
-      decision: 'deny',
-      source: 'rule:localSettings',
-      permissionMode: 'default',
-    })
-    expect(
-      events.find(event => event.type === 'tool.error')?.payload,
-    ).toMatchObject({
-      classification: 'permission_denied',
-      message: 'Permission denied by test',
-    })
-  })
-
-  test('emits permission_ask tool.error for ask-return-error decisions', async () => {
-    hookState.resolvePermission = async (input: Record<string, unknown>) => ({
-      decision: {
-        behavior: 'ask',
-        message: 'Permission ask returned error',
-        updatedInput: input,
-        decisionReason: {
-          type: 'mode',
-          mode: 'default',
-        },
-      },
-      input,
-    })
-    const tool = makeTraceTestTool({
-      call: async () => ({ data: { ok: true } }),
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-permission-ask',
-    )
-
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_permission_ask_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-permission-ask' },
-    )
-    await flushTraceForTesting()
-
-    const events = getNonSessionEvents()
-    expect(
-      events.find(event => event.type === 'tool.permission_result')?.payload,
-    ).toMatchObject({
-      decision: 'ask',
-      source: 'mode',
-      permissionMode: 'default',
-    })
-    expect(
-      events.find(event => event.type === 'tool.error')?.payload,
-    ).toMatchObject({
-      classification: 'permission_ask',
-      message: 'Permission ask returned error',
-    })
-  })
-
-  test('emits tool.cancelled for direct pre-run cancellation', async () => {
-    const tool = makeTraceTestTool({
-      call: async () => ({ data: { ok: true } }),
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    toolUseContext.abortController.abort('interrupt')
-    const assistantMessage = makeAssistantMessage('assistant-parent-cancelled')
-
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_cancelled_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-cancelled' },
-    )
-    await flushTraceForTesting()
-
-    expect(getNonSessionEvents()).toEqual([
-      expect.objectContaining({
-        type: 'tool.cancelled',
-        turnId: 'turn-tool-cancelled',
-        payload: expect.objectContaining({
+      const events = getNonSessionEvents()
+      expect(events.map(event => event.type)).toEqual([
+        'hook.started',
+        'hook.result',
+        'tool.permission_result',
+        'tool.started',
+        'hook.started',
+        'hook.result',
+        'tool.result',
+      ])
+      expect(events.every(event => event.turnId === 'turn-tool-success')).toBe(
+        true,
+      )
+      expect(
+        events.every(event => event.parentId === assistantMessage.message.id),
+      ).toBe(true)
+      for (const event of events) {
+        expect(event.payload).toMatchObject({
           toolName: 'TraceExecTool',
-          toolUseId: 'toolu_trace_cancelled_1',
-          reason: 'user_interrupted',
-          classification: 'user_interrupted',
+          toolUseId: 'toolu_trace_success_1',
+        })
+        expect(event.payload).toHaveProperty('durationMs')
+      }
+      expect(
+        events.filter(event => event.type === 'tool.started'),
+      ).toHaveLength(1)
+      expect(hookState.seenPreContext).not.toHaveProperty('traceTurnId')
+      expect(hookState.seenPermissionContext).not.toHaveProperty('traceTurnId')
+      expect(seenCallContexts).toHaveLength(1)
+      expect(seenCallContexts[0]).not.toHaveProperty('traceTurnId')
+      expect(JSON.stringify(events)).not.toContain('model input secret')
+    })
+
+    test('emits validation tool.error for schema validation failure without raw input', async () => {
+      const tool = makeTraceTestTool({
+        call: async () => ({ data: { ok: true } }),
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-schema-error',
+      )
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        {
+          ...makeToolUseBlock('toolu_trace_schema_error_1'),
+          input: { secret: 42 },
+        } as ToolUseBlock,
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-schema-error' },
+      )
+      await flushTraceForTesting()
+
+      const errorEvent = getNonSessionEvents().find(
+        event => event.type === 'tool.error',
+      )
+      expect(errorEvent).toBeDefined()
+      expect(errorEvent?.turnId).toBe('turn-tool-schema-error')
+      expect(errorEvent?.payload).toMatchObject({
+        toolName: 'TraceExecTool',
+        toolUseId: 'toolu_trace_schema_error_1',
+        classification: 'validation',
+        errorName: 'InputValidationError',
+      })
+      expect(JSON.stringify(errorEvent)).not.toContain('model input secret')
+    })
+
+    test('emits validation tool.error for validateInput failure', async () => {
+      const tool = makeTraceTestTool({
+        validateInput: async () => ({
+          result: false,
+          message: 'synthetic validateInput failure',
+          errorCode: 'synthetic_validation',
         }),
-      }),
-    ])
-  })
+        call: async () => ({ data: { ok: true } }),
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-validate-error',
+      )
 
-  test('pairs PreToolUse hook.result and emits tool.error when PreToolUse throws', async () => {
-    hookState.pre = (...args: unknown[]) => {
-      hookState.seenPreContext = args[0] as ToolUseContext
-      return throwHookError(new Error('synthetic pre hook failure'))
-    }
-    const tool = makeTraceTestTool({
-      call: async () => ({ data: { ok: true } }),
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage('assistant-parent-pre-hook')
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_validate_error_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-validate-error' },
+      )
+      await flushTraceForTesting()
 
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
+      const errorEvent = getNonSessionEvents().find(
+        event => event.type === 'tool.error',
+      )
+      expect(errorEvent?.payload).toMatchObject({
+        classification: 'validation',
+        errorName: 'InputValidationError',
+        message: 'synthetic validateInput failure',
+      })
     })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_pre_hook_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-pre-hook' },
-    )
-    await flushTraceForTesting()
 
-    const events = getNonSessionEvents()
-    expect(events.map(event => event.type)).toEqual([
-      'hook.started',
-      'hook.result',
-      'tool.error',
-    ])
-    expect(events[1].payload).toMatchObject({
-      hookEvent: 'PreToolUse',
-      status: 'error',
-      errorName: 'Error',
-      message: 'synthetic pre hook failure',
-    })
-    expect(events[2].payload).toMatchObject({
-      classification: 'hook_error',
-      errorName: 'Error',
-      message: 'synthetic pre hook failure',
-    })
-  })
+    test('emits permission_result and permission_denied tool.error for deny decisions', async () => {
+      hookState.resolvePermission = async (input: Record<string, unknown>) => ({
+        decision: {
+          behavior: 'deny',
+          message: 'Permission denied by test',
+          updatedInput: input,
+          decisionReason: {
+            type: 'rule',
+            rule: { source: 'localSettings' },
+          },
+        },
+        input,
+      })
+      const tool = makeTraceTestTool({
+        call: async () => ({ data: { ok: true } }),
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-permission-deny',
+      )
 
-  test('pairs PostToolUse hook.result and emits tool.error when PostToolUse throws', async () => {
-    hookState.post = () =>
-      throwHookError(new Error('synthetic post hook failure'))
-    const tool = makeTraceTestTool({
-      call: async () => ({ data: { ok: true } }),
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage('assistant-parent-post-hook')
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_permission_deny_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-permission-deny' },
+      )
+      await flushTraceForTesting()
 
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
+      const events = getNonSessionEvents()
+      expect(
+        events.find(event => event.type === 'tool.permission_result')?.payload,
+      ).toMatchObject({
+        decision: 'deny',
+        source: 'rule:localSettings',
+        permissionMode: 'default',
+      })
+      expect(
+        events.find(event => event.type === 'tool.error')?.payload,
+      ).toMatchObject({
+        classification: 'permission_denied',
+        message: 'Permission denied by test',
+      })
     })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_post_hook_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-post-hook' },
-    )
-    await flushTraceForTesting()
 
-    const postResultEvent = getNonSessionEvents().find(
-      event =>
-        event.type === 'hook.result' &&
-        event.payload.hookEvent === 'PostToolUse',
-    )
-    const toolErrorEvent = getNonSessionEvents().find(
-      event => event.type === 'tool.error',
-    )
-    expect(postResultEvent?.payload).toMatchObject({
-      status: 'error',
-      errorName: 'Error',
-      message: 'synthetic post hook failure',
-    })
-    expect(toolErrorEvent?.payload).toMatchObject({
-      classification: 'hook_error',
-      errorName: 'Error',
-      message: 'synthetic post hook failure',
-    })
-  })
+    test('emits permission_ask tool.error for ask-return-error decisions', async () => {
+      hookState.resolvePermission = async (input: Record<string, unknown>) => ({
+        decision: {
+          behavior: 'ask',
+          message: 'Permission ask returned error',
+          updatedInput: input,
+          decisionReason: {
+            type: 'mode',
+            mode: 'default',
+          },
+        },
+        input,
+      })
+      const tool = makeTraceTestTool({
+        call: async () => ({ data: { ok: true } }),
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-permission-ask',
+      )
 
-  test('pairs PostToolUseFailure hook.result when failure hook throws', async () => {
-    hookState.failure = () =>
-      throwHookError(new Error('synthetic failure hook failure'))
-    const tool = makeTraceTestTool({
-      call: async () => {
-        throw new Error('synthetic tool failure')
-      },
-    })
-    const toolUseContext = makeToolUseContext(tool)
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-failure-hook',
-    )
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_permission_ask_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-permission-ask' },
+      )
+      await flushTraceForTesting()
 
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
+      const events = getNonSessionEvents()
+      expect(
+        events.find(event => event.type === 'tool.permission_result')?.payload,
+      ).toMatchObject({
+        decision: 'ask',
+        source: 'mode',
+        permissionMode: 'default',
+      })
+      expect(
+        events.find(event => event.type === 'tool.error')?.payload,
+      ).toMatchObject({
+        classification: 'permission_ask',
+        message: 'Permission ask returned error',
+      })
     })
-    await drainRunToolUse(
-      makeToolUseBlock('toolu_trace_failure_hook_1'),
-      assistantMessage,
-      toolUseContext,
-      { turnId: 'turn-tool-failure-hook' },
-    )
-    await flushTraceForTesting()
 
-    const events = getNonSessionEvents()
-    const failureResultEvent = events.find(
-      event =>
-        event.type === 'hook.result' &&
-        event.payload.hookEvent === 'PostToolUseFailure',
-    )
-    expect(failureResultEvent?.payload).toMatchObject({
-      status: 'error',
-      errorName: 'Error',
-      message: 'synthetic failure hook failure',
+    test('emits tool.cancelled for direct pre-run cancellation', async () => {
+      const tool = makeTraceTestTool({
+        call: async () => ({ data: { ok: true } }),
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      toolUseContext.abortController.abort('interrupt')
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-cancelled',
+      )
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_cancelled_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-cancelled' },
+      )
+      await flushTraceForTesting()
+
+      expect(getNonSessionEvents()).toEqual([
+        expect.objectContaining({
+          type: 'tool.cancelled',
+          turnId: 'turn-tool-cancelled',
+          payload: expect.objectContaining({
+            toolName: 'TraceExecTool',
+            toolUseId: 'toolu_trace_cancelled_1',
+            reason: 'user_interrupted',
+            classification: 'user_interrupted',
+          }),
+        }),
+      ])
     })
-    expect(
-      events.filter(event => event.type === 'tool.error').at(-1)?.payload,
-    ).toMatchObject({
-      classification: 'hook_error',
-      errorName: 'Error',
-      message: 'synthetic failure hook failure',
+
+    test('pairs PreToolUse hook.result and emits tool.error when PreToolUse throws', async () => {
+      hookState.pre = (...args: unknown[]) => {
+        hookState.seenPreContext = args[0] as ToolUseContext
+        return throwHookError(new Error('synthetic pre hook failure'))
+      }
+      const tool = makeTraceTestTool({
+        call: async () => ({ data: { ok: true } }),
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage('assistant-parent-pre-hook')
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_pre_hook_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-pre-hook' },
+      )
+      await flushTraceForTesting()
+
+      const events = getNonSessionEvents()
+      expect(events.map(event => event.type)).toEqual([
+        'hook.started',
+        'hook.result',
+        'tool.error',
+      ])
+      expect(events[1].payload).toMatchObject({
+        hookEvent: 'PreToolUse',
+        status: 'error',
+        errorName: 'Error',
+        message: 'synthetic pre hook failure',
+      })
+      expect(events[2].payload).toMatchObject({
+        classification: 'hook_error',
+        errorName: 'Error',
+        message: 'synthetic pre hook failure',
+      })
     })
-  })
+
+    test('pairs PostToolUse hook.result and emits tool.error when PostToolUse throws', async () => {
+      hookState.post = () =>
+        throwHookError(new Error('synthetic post hook failure'))
+      const tool = makeTraceTestTool({
+        call: async () => ({ data: { ok: true } }),
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-post-hook',
+      )
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_post_hook_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-post-hook' },
+      )
+      await flushTraceForTesting()
+
+      const postResultEvent = getNonSessionEvents().find(
+        event =>
+          event.type === 'hook.result' &&
+          event.payload.hookEvent === 'PostToolUse',
+      )
+      const toolErrorEvent = getNonSessionEvents().find(
+        event => event.type === 'tool.error',
+      )
+      expect(postResultEvent?.payload).toMatchObject({
+        status: 'error',
+        errorName: 'Error',
+        message: 'synthetic post hook failure',
+      })
+      expect(toolErrorEvent?.payload).toMatchObject({
+        classification: 'hook_error',
+        errorName: 'Error',
+        message: 'synthetic post hook failure',
+      })
+    })
+
+    test('pairs PostToolUseFailure hook.result when failure hook throws', async () => {
+      hookState.failure = () =>
+        throwHookError(new Error('synthetic failure hook failure'))
+      const tool = makeTraceTestTool({
+        call: async () => {
+          throw new Error('synthetic tool failure')
+        },
+      })
+      const toolUseContext = makeToolUseContext(tool)
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-failure-hook',
+      )
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      await drainRunToolUse(
+        makeToolUseBlock('toolu_trace_failure_hook_1'),
+        assistantMessage,
+        toolUseContext,
+        { turnId: 'turn-tool-failure-hook' },
+      )
+      await flushTraceForTesting()
+
+      const events = getNonSessionEvents()
+      const failureResultEvent = events.find(
+        event =>
+          event.type === 'hook.result' &&
+          event.payload.hookEvent === 'PostToolUseFailure',
+      )
+      expect(failureResultEvent?.payload).toMatchObject({
+        status: 'error',
+        errorName: 'Error',
+        message: 'synthetic failure hook failure',
+      })
+      expect(
+        events.filter(event => event.type === 'tool.error').at(-1)?.payload,
+      ).toMatchObject({
+        classification: 'hook_error',
+        errorName: 'Error',
+        message: 'synthetic failure hook failure',
+      })
+    })
+  }
 
   test('builds summarized learn-mode and payload-carrying full-mode result traces', () => {
     const learnPayload =

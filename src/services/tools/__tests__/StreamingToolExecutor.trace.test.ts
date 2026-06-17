@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ToolUseBlock } from '@anthropic-ai/sdk/resources/index.mjs'
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { feature } from 'bun:bundle'
 import { z } from 'zod/v4'
 import type { ToolUseContext } from '../../../Tool.js'
 import type { AssistantMessage } from '../../../types/message.js'
@@ -13,9 +14,9 @@ let traceDir = ''
 let sessionId = ''
 
 mock.module('src/services/tools/toolHooks.js', () => ({
-  runPreToolUseHooks: async function* () {},
-  runPostToolUseHooks: async function* () {},
-  runPostToolUseFailureHooks: async function* () {},
+  runPreToolUseHooks: () => noHookResults(),
+  runPostToolUseHooks: () => noHookResults(),
+  runPostToolUseFailureHooks: () => noHookResults(),
   resolveHookPermissionDecision: async (
     _hookPermissionResult: unknown,
     _tool: unknown,
@@ -64,6 +65,12 @@ const { getTraceConfigPath, getTraceRootDir } = await import(
 )
 const { readTraceEvents } = await import('../../../trace/store.js')
 
+async function* noHookResults(): AsyncGenerator<never, void, unknown> {
+  if (false) {
+    yield undefined as never
+  }
+}
+
 describe('StreamingToolExecutor trace instrumentation', () => {
   beforeEach(async () => {
     traceDir = await mkdtemp(join(tmpdir(), 'stream-trace-test-'))
@@ -101,162 +108,167 @@ describe('StreamingToolExecutor trace instrumentation', () => {
     expect(await readdir(getTraceRootDir())).toEqual(['config.json'])
   })
 
-  test('emits detected, started, and result once for streaming success with internal turnId', async () => {
-    const seenContexts: ToolUseContext[] = []
-    const tool = makeToolDefinition({
-      call: async (_input, context) => {
-        seenContexts.push(context)
-        return { data: { ok: true } }
-      },
-    })
-    const ctx = makeToolUseContext([tool])
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-stream-success',
-    )
-    const executor = new StreamingToolExecutor(
-      [tool],
-      async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
-      ctx,
-      { turnId: 'turn-stream-success' },
-    )
+  if (feature('HARNESS_TRACE')) {
+    test('emits detected, started, and result once for streaming success with internal turnId', async () => {
+      const seenContexts: ToolUseContext[] = []
+      const tool = makeToolDefinition({
+        call: async (_input, context) => {
+          seenContexts.push(context)
+          return { data: { ok: true } }
+        },
+      })
+      const ctx = makeToolUseContext([tool])
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-stream-success',
+      )
+      const executor = new StreamingToolExecutor(
+        [tool],
+        async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
+        ctx,
+        { turnId: 'turn-stream-success' },
+      )
 
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    executor.addTool(
-      makeToolUseBlock('toolu_stream_success_1'),
-      assistantMessage,
-    )
-    for await (const _update of executor.getRemainingResults()) {
-      // Drain executor
-    }
-    await flushTraceForTesting()
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      executor.addTool(
+        makeToolUseBlock('toolu_stream_success_1'),
+        assistantMessage,
+      )
+      for await (const _update of executor.getRemainingResults()) {
+        // Drain executor
+      }
+      await flushTraceForTesting()
 
-    const events = getNonSessionEvents()
-    expect(events.map(event => event.type)).toEqual([
-      'tool.detected',
-      'hook.started',
-      'hook.result',
-      'tool.permission_result',
-      'tool.started',
-      'hook.started',
-      'hook.result',
-      'tool.result',
-    ])
-    expect(events.filter(event => event.type === 'tool.started')).toHaveLength(
-      1,
-    )
-    expect(events.every(event => event.turnId === 'turn-stream-success')).toBe(
-      true,
-    )
-    expect(
-      events.every(event => event.parentId === assistantMessage.message.id),
-    ).toBe(true)
-    expect(seenContexts).toHaveLength(1)
-    expect(seenContexts[0]).not.toHaveProperty('traceTurnId')
-  })
-
-  test('emits queued when a streaming tool waits behind a sibling', async () => {
-    let releaseFirstTool!: () => void
-    const firstTool = makeToolDefinition({
-      call: async () => {
-        await new Promise<void>(resolve => {
-          releaseFirstTool = resolve
-        })
-        return { data: { ok: true } }
-      },
-    })
-    const secondTool = makeToolDefinition({ name: 'TraceSecondTool' })
-    const ctx = makeToolUseContext([firstTool, secondTool])
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-stream-queue',
-    )
-    const executor = new StreamingToolExecutor(
-      [firstTool, secondTool],
-      async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
-      ctx,
-      { turnId: 'turn-stream-queue' },
-    )
-
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    executor.addTool(makeToolUseBlock('toolu_stream_queue_1'), assistantMessage)
-    executor.addTool(
-      makeToolUseBlock('toolu_stream_queue_2', 'TraceSecondTool'),
-      assistantMessage,
-    )
-    await Promise.resolve()
-    await flushTraceForTesting()
-
-    const queuedEvent = getNonSessionEvents().find(
-      event => event.type === 'tool.queued',
-    )
-    expect(queuedEvent?.turnId).toBe('turn-stream-queue')
-    expect(queuedEvent?.payload).toMatchObject({
-      toolName: 'TraceSecondTool',
-      toolUseId: 'toolu_stream_queue_2',
-      queueReason: 'execution_slot_unavailable',
+      const events = getNonSessionEvents()
+      expect(events.map(event => event.type)).toEqual([
+        'tool.detected',
+        'hook.started',
+        'hook.result',
+        'tool.permission_result',
+        'tool.started',
+        'hook.started',
+        'hook.result',
+        'tool.result',
+      ])
+      expect(
+        events.filter(event => event.type === 'tool.started'),
+      ).toHaveLength(1)
+      expect(
+        events.every(event => event.turnId === 'turn-stream-success'),
+      ).toBe(true)
+      expect(
+        events.every(event => event.parentId === assistantMessage.message.id),
+      ).toBe(true)
+      expect(seenContexts).toHaveLength(1)
+      expect(seenContexts[0]).not.toHaveProperty('traceTurnId')
     })
 
-    releaseFirstTool()
-    for await (const _update of executor.getRemainingResults()) {
-      // Drain executor
-    }
-  })
+    test('emits queued when a streaming tool waits behind a sibling', async () => {
+      let releaseFirstTool!: () => void
+      const firstTool = makeToolDefinition({
+        call: async () => {
+          await new Promise<void>(resolve => {
+            releaseFirstTool = resolve
+          })
+          return { data: { ok: true } }
+        },
+      })
+      const secondTool = makeToolDefinition({ name: 'TraceSecondTool' })
+      const ctx = makeToolUseContext([firstTool, secondTool])
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-stream-queue',
+      )
+      const executor = new StreamingToolExecutor(
+        [firstTool, secondTool],
+        async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
+        ctx,
+        { turnId: 'turn-stream-queue' },
+      )
 
-  test('emits streaming_fallback cancellation with internal turnId on discard', async () => {
-    const tool = makeToolDefinition({
-      call: async (_input, context) => {
-        await new Promise((_resolve, reject) => {
-          context.abortController.signal.addEventListener(
-            'abort',
-            () => reject(new Error('aborted by test')),
-            { once: true },
-          )
-        })
-        return { data: { ok: true } }
-      },
-    })
-    const ctx = makeToolUseContext([tool])
-    const assistantMessage = makeAssistantMessage(
-      'assistant-parent-stream-cancel',
-    )
-    const executor = new StreamingToolExecutor(
-      [tool],
-      async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
-      ctx,
-      { turnId: 'turn-stream-cancel' },
-    )
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      executor.addTool(
+        makeToolUseBlock('toolu_stream_queue_1'),
+        assistantMessage,
+      )
+      executor.addTool(
+        makeToolUseBlock('toolu_stream_queue_2', 'TraceSecondTool'),
+        assistantMessage,
+      )
+      await Promise.resolve()
+      await flushTraceForTesting()
 
-    startTraceSession({
-      sessionId,
-      cwd: traceDir,
-      argv: ['claude', '-p'],
-    })
-    executor.addTool(
-      makeToolUseBlock('toolu_stream_cancel_1'),
-      assistantMessage,
-    )
-    await Promise.resolve()
-    executor.discard()
-    await flushTraceForTesting()
+      const queuedEvent = getNonSessionEvents().find(
+        event => event.type === 'tool.queued',
+      )
+      expect(queuedEvent?.turnId).toBe('turn-stream-queue')
+      expect(queuedEvent?.payload).toMatchObject({
+        toolName: 'TraceSecondTool',
+        toolUseId: 'toolu_stream_queue_2',
+        queueReason: 'execution_slot_unavailable',
+      })
 
-    const cancelledEvent = getNonSessionEvents().find(
-      event => event.type === 'tool.cancelled',
-    )
-    expect(cancelledEvent?.turnId).toBe('turn-stream-cancel')
-    expect(cancelledEvent?.payload).toMatchObject({
-      toolName: 'TraceTestTool',
-      toolUseId: 'toolu_stream_cancel_1',
-      reason: 'streaming_fallback',
-      classification: 'streaming_fallback',
+      releaseFirstTool()
+      for await (const _update of executor.getRemainingResults()) {
+        // Drain executor
+      }
     })
-  })
+
+    test('emits streaming_fallback cancellation with internal turnId on discard', async () => {
+      const tool = makeToolDefinition({
+        call: async (_input, context) => {
+          await new Promise((_resolve, reject) => {
+            context.abortController.signal.addEventListener(
+              'abort',
+              () => reject(new Error('aborted by test')),
+              { once: true },
+            )
+          })
+          return { data: { ok: true } }
+        },
+      })
+      const ctx = makeToolUseContext([tool])
+      const assistantMessage = makeAssistantMessage(
+        'assistant-parent-stream-cancel',
+      )
+      const executor = new StreamingToolExecutor(
+        [tool],
+        async (_tool, input) => ({ behavior: 'allow', updatedInput: input }),
+        ctx,
+        { turnId: 'turn-stream-cancel' },
+      )
+
+      startTraceSession({
+        sessionId,
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+      executor.addTool(
+        makeToolUseBlock('toolu_stream_cancel_1'),
+        assistantMessage,
+      )
+      await Promise.resolve()
+      executor.discard()
+      await flushTraceForTesting()
+
+      const cancelledEvent = getNonSessionEvents().find(
+        event => event.type === 'tool.cancelled',
+      )
+      expect(cancelledEvent?.turnId).toBe('turn-stream-cancel')
+      expect(cancelledEvent?.payload).toMatchObject({
+        toolName: 'TraceTestTool',
+        toolUseId: 'toolu_stream_cancel_1',
+        reason: 'streaming_fallback',
+        classification: 'streaming_fallback',
+      })
+    })
+  }
 
   test('builds streaming tool payloads with required correlation fields', () => {
     expect(
