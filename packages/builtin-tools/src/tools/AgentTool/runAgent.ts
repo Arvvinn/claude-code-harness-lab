@@ -236,8 +236,6 @@ type QueryMessage =
 
 type SubagentStatus = 'completed' | 'aborted' | 'error'
 
-const PROMPT_PREVIEW_CHARS = 200
-
 export function buildSubagentStartedTracePayload({
   agentType,
   agentName,
@@ -343,61 +341,94 @@ export function countToolUsesInMessage(message: Message): number {
 }
 
 function summarizePromptMessages(messages: Message[]): Record<string, unknown> {
+  const contentBlockTypes: Record<string, number> = {}
+  let contentBlockCount = 0
+  let textBlockCount = 0
   let textCharCount = 0
-  let textPreview = ''
 
   for (const message of messages) {
-    for (const text of extractTextParts(message)) {
-      textCharCount += text.length
-      if (textPreview.length < PROMPT_PREVIEW_CHARS) {
-        const remaining = PROMPT_PREVIEW_CHARS - textPreview.length
-        textPreview += text.slice(0, remaining)
-      }
+    const summary = summarizeMessageContent(message)
+    contentBlockCount += summary.contentBlockCount
+    textBlockCount += summary.textBlockCount
+    textCharCount += summary.textCharCount
+    for (const [type, count] of Object.entries(summary.contentBlockTypes)) {
+      contentBlockTypes[type] = (contentBlockTypes[type] ?? 0) + count
     }
   }
 
-  const summary: Record<string, unknown> = {
+  return {
     messageCount: messages.length,
+    contentBlockCount,
+    textBlockCount,
     textCharCount,
+    contentBlockTypes,
   }
-
-  if (textPreview.length > 0) {
-    summary.textPreview = textPreview
-  }
-
-  return summary
 }
 
-function extractTextParts(message: Message): string[] {
+function summarizeMessageContent(message: Message): {
+  contentBlockCount: number
+  textBlockCount: number
+  textCharCount: number
+  contentBlockTypes: Record<string, number>
+} {
   if (message.type !== 'user' && message.type !== 'assistant') {
-    return []
+    return {
+      contentBlockCount: 0,
+      textBlockCount: 0,
+      textCharCount: 0,
+      contentBlockTypes: {},
+    }
   }
 
   const content = message.message?.content
 
   if (typeof content === 'string') {
-    return [content]
+    return {
+      contentBlockCount: 1,
+      textBlockCount: 1,
+      textCharCount: content.length,
+      contentBlockTypes: { text: 1 },
+    }
   }
 
   if (!Array.isArray(content)) {
-    return []
+    return {
+      contentBlockCount: 0,
+      textBlockCount: 0,
+      textCharCount: 0,
+      contentBlockTypes: {},
+    }
   }
 
-  const textParts: string[] = []
+  const summary = {
+    contentBlockCount: content.length,
+    textBlockCount: 0,
+    textCharCount: 0,
+    contentBlockTypes: {} as Record<string, number>,
+  }
+
   for (const block of content) {
+    if (typeof block !== 'object' || block === null || !('type' in block)) {
+      summary.contentBlockTypes.unknown =
+        (summary.contentBlockTypes.unknown ?? 0) + 1
+      continue
+    }
+
+    const blockType = typeof block.type === 'string' ? block.type : 'unknown'
+    summary.contentBlockTypes[blockType] =
+      (summary.contentBlockTypes[blockType] ?? 0) + 1
+
     if (
-      typeof block === 'object' &&
-      block !== null &&
-      'type' in block &&
       block.type === 'text' &&
       'text' in block &&
       typeof block.text === 'string'
     ) {
-      textParts.push(block.text)
+      summary.textBlockCount += 1
+      summary.textCharCount += block.text.length
     }
   }
 
-  return textParts
+  return summary
 }
 
 /**

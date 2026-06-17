@@ -11,7 +11,8 @@ import {
 
 describe('runAgent trace helpers', () => {
   test('builds a learn-mode start payload with prompt metadata only', () => {
-    const longPrompt = `Investigate this prompt: ${'secret details '.repeat(80)}`
+    const distinctivePrompt = 'DISTINCTIVE_LEARN_PROMPT_SHOULD_NOT_BE_PERSISTED'
+    const longPrompt = `Investigate this prompt: ${distinctivePrompt} ${'secret details '.repeat(80)}`
     const payload = buildSubagentStartedTracePayload({
       agentType: 'Explore',
       agentName: 'Explore',
@@ -32,13 +33,13 @@ describe('runAgent trace helpers', () => {
       },
     })
     expect(payload).not.toHaveProperty('promptMessages')
-    expect(
-      (payload.promptSummary as { textPreview?: string }).textPreview?.length,
-    ).toBeLessThan(longPrompt.length)
+    expect(JSON.stringify(payload)).not.toContain(distinctivePrompt)
+    expect(payload.promptSummary).not.toHaveProperty('textPreview')
   })
 
   test('builds a full-mode start payload with prompt messages for redacted trace output', () => {
-    const promptMessage = createUserMessage({ content: 'Inspect failing test' })
+    const distinctivePrompt = 'DISTINCTIVE_FULL_PROMPT_FOR_REDACTION_PATH'
+    const promptMessage = createUserMessage({ content: distinctivePrompt })
     const payload = buildSubagentStartedTracePayload({
       agentType: 'Plan',
       agentName: 'planner.md',
@@ -54,9 +55,10 @@ describe('runAgent trace helpers', () => {
       promptMessages: [promptMessage],
       promptSummary: {
         messageCount: 1,
-        textCharCount: 'Inspect failing test'.length,
+        textCharCount: distinctivePrompt.length,
       },
     })
+    expect(JSON.stringify(payload)).toContain(distinctivePrompt)
   })
 
   test('counts assistant tool_use blocks for end payloads', () => {
