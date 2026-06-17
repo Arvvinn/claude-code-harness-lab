@@ -466,6 +466,7 @@ export class QueryEngine {
           tools,
           this.mutableMessages,
           processUserInputContext,
+          { turnId: traceTurnId },
         )) {
           yield message
         }

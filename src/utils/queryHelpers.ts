@@ -5,6 +5,7 @@ import {
 } from 'src/bootstrap/state.js'
 import type { SDKMessage } from 'src/entrypoints/agentSdkTypes.js'
 import type { CanUseToolFn } from '../hooks/useCanUseTool.js'
+import type { ToolTraceMetadata } from '../services/tools/toolExecution.js'
 import { runTools } from '../services/tools/toolOrchestration.js'
 import { findToolByName, type Tool, type Tools } from '../Tool.js'
 import { BASH_TOOL_NAME } from '@claude-code-best/builtin-tools/tools/BashTool/toolName.js'
@@ -249,6 +250,7 @@ export async function* handleOrphanedPermission(
   tools: Tools,
   mutableMessages: Message[],
   processUserInputContext: ProcessUserInputContext,
+  traceMetadata?: ToolTraceMetadata,
 ): AsyncGenerator<SDKMessage, void, unknown> {
   const persistSession = !isSessionPersistenceDisabled()
   const { permissionResult, assistantMessage } = orphanedPermission
@@ -366,6 +368,7 @@ export async function* handleOrphanedPermission(
     [assistantMessage],
     canUseTool,
     processUserInputContext,
+    traceMetadata,
   )) {
     if (update.message) {
       mutableMessages.push(update.message)

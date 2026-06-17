@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { feature } from 'bun:bundle'
+import { z } from 'zod/v4'
 import type { TraceConfig } from '../types'
 
 const originalTraceDir = process.env.CLAUDE_CODE_TRACE_DIR
@@ -49,8 +50,13 @@ if (feature('HARNESS_TRACE')) {
   mock.module('../../utils/queryContext.js', queryContextMock)
   mock.module('../../utils/queryContext.ts', queryContextMock)
 
-  const { resetStateForTests, setCwdState, setOriginalCwd, setProjectRoot } =
-    await import('../../bootstrap/state')
+  const {
+    resetStateForTests,
+    setCwdState,
+    setOriginalCwd,
+    setProjectRoot,
+    setSessionPersistenceDisabled,
+  } = await import('../../bootstrap/state')
   const { QueryEngine } = await import('../../QueryEngine')
   const { getEmptyToolPermissionContext } = await import('../../Tool')
   const { flushTraceForTesting, resetTraceForTesting, startTraceSession } =
@@ -88,6 +94,7 @@ if (feature('HARNESS_TRACE')) {
   function createQueryEngine(
     customSystemPrompt: string,
     cwd = traceDir,
+    overrides: Partial<ConstructorParameters<typeof QueryEngine>[0]> = {},
   ): InstanceType<typeof QueryEngine> {
     return new QueryEngine({
       cwd,
@@ -103,6 +110,7 @@ if (feature('HARNESS_TRACE')) {
       setAppState,
       readFileCache: createFileStateCacheWithSizeLimit(10),
       customSystemPrompt,
+      ...overrides,
     })
   }
 
@@ -287,7 +295,140 @@ if (feature('HARNESS_TRACE')) {
       expect(JSON.stringify(boundaryEvents)).not.toContain(rawPrompt)
       expect(JSON.stringify(boundaryEvents)).not.toContain(missingCwd)
     })
+
+    test('propagates turnId to orphaned permission tool execution traces', async () => {
+      setSessionPersistenceDisabled(true)
+      const tool = createOrphanedPermissionTraceTool()
+      const assistantMessage = createOrphanedPermissionAssistantMessage()
+      startTraceSession({
+        sessionId: 'session-query-engine-orphaned-permission',
+        cwd: traceDir,
+        argv: ['claude', '-p'],
+      })
+
+      const engine = createQueryEngine('test system prompt', traceDir, {
+        tools: [tool],
+        orphanedPermission: {
+          assistantMessage,
+          permissionResult: {
+            behavior: 'allow',
+            updatedInput: { payload: 'approved payload' },
+            toolUseID: 'toolu_orphaned_permission_1',
+          } as any,
+        },
+      })
+
+      await expect(
+        drainSubmitUntilDone(engine.submitMessage('prompt after permission')),
+      ).rejects.toThrow('input processing failed for trace boundary test')
+      await flushTraceForTesting()
+
+      const events = readTraceEvents('session-query-engine-orphaned-permission')
+      const turnId = events.find(event => event.type === 'turn.start')?.turnId
+      const toolEvents = events.filter(
+        event =>
+          event.type.startsWith('tool.') || event.type.startsWith('hook.'),
+      )
+
+      expect(typeof turnId).toBe('string')
+      expect(toolEvents.map(event => event.type)).toEqual([
+        'tool.detected',
+        'hook.started',
+        'hook.result',
+        'tool.permission_result',
+        'tool.started',
+        'hook.started',
+        'hook.result',
+        'tool.result',
+      ])
+      expect(toolEvents.every(event => event.turnId === turnId)).toBe(true)
+      expect(toolEvents.every(event => event.turnId !== undefined)).toBe(true)
+      expect(
+        toolEvents.every(
+          event => event.parentId === 'msg_orphaned_permission_trace',
+        ),
+      ).toBe(true)
+      expect(
+        toolEvents.find(event => event.type === 'tool.permission_result')
+          ?.payload,
+      ).toMatchObject({
+        toolName: 'TraceOrphanedPermissionTool',
+        toolUseId: 'toolu_orphaned_permission_1',
+        decision: 'allow',
+        durationMs: expect.any(Number),
+      })
+    })
   })
+
+  async function drainSubmitUntilDone(
+    generator: AsyncGenerator<unknown, void, unknown>,
+  ): Promise<void> {
+    let next = await generator.next()
+    while (!next.done) {
+      next = await generator.next()
+    }
+  }
+
+  function createOrphanedPermissionTraceTool(): any {
+    return {
+      name: 'TraceOrphanedPermissionTool',
+      inputSchema: z.object({
+        payload: z.string(),
+      }),
+      isConcurrencySafe: () => false,
+      isEnabled: () => true,
+      isReadOnly: () => true,
+      prompt: async () => '',
+      description: async () => 'Trace orphaned permission test tool',
+      userFacingName: () => 'TraceOrphanedPermissionTool',
+      toAutoClassifierInput: () => '',
+      maxResultSizeChars: Infinity,
+      renderToolUseMessage: () => null,
+      mapToolResultToToolResultBlockParam: (
+        content: unknown,
+        toolUseId: string,
+      ) => ({
+        type: 'tool_result',
+        content: JSON.stringify(content),
+        tool_use_id: toolUseId,
+        is_error: false,
+      }),
+      call: async () => ({ data: { ok: true } }),
+    }
+  }
+
+  function createOrphanedPermissionAssistantMessage(): any {
+    return {
+      type: 'assistant',
+      uuid: 'assistant-orphaned-permission-uuid',
+      timestamp: new Date().toISOString(),
+      requestId: 'req-orphaned-permission-trace',
+      message: {
+        id: 'msg_orphaned_permission_trace',
+        type: 'message',
+        role: 'assistant',
+        model: 'test-model',
+        stop_reason: 'tool_use',
+        stop_sequence: null,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        content: [
+          {
+            id: 'toolu_orphaned_permission_1',
+            type: 'tool_use',
+            name: 'TraceOrphanedPermissionTool',
+            input: {
+              payload: 'original payload',
+            },
+          },
+        ],
+      },
+    }
+  }
 } else {
   describe('QueryEngine trace turn boundaries', () => {
     test('does not pass traceTurnId to query params when HARNESS_TRACE is disabled', async () => {
