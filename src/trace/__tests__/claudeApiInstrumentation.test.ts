@@ -5,12 +5,17 @@ import type {
   BetaMessageStreamParams,
   BetaRawMessageStreamEvent,
 } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
+import { APIError } from '@anthropic-ai/sdk/error'
 import type { SystemAPIErrorMessage } from '../../types/message'
+import { redactTracePayload } from '../redaction.js'
 import { debugMock } from '../../../tests/mocks/debug.js'
 import { logMock } from '../../../tests/mocks/log.js'
 
 mock.module('src/utils/debug.ts', debugMock)
 mock.module('src/utils/log.ts', logMock)
+mock.module('src/utils/sleep.ts', () => ({
+  sleep: async () => {},
+}))
 mock.module('bun:bundle', () => ({
   feature: () => false,
 }))
@@ -20,6 +25,9 @@ const {
   runNonStreamingRequestAttempt,
   yieldNonStreamingRetryMessages,
 } = await import('../../services/api/claude')
+const { FallbackTriggeredError, withRetry } = await import(
+  '../../services/api/withRetry'
+)
 
 describe('claude API trace instrumentation source boundaries', () => {
   const source = readFileSync(
@@ -35,10 +43,10 @@ describe('claude API trace instrumentation source boundaries', () => {
     expect(source).toContain("type: 'api.request_built'")
     expect(source).toContain("type: 'api.stream_event'")
     expect(source).toContain("type: 'api.assistant_message'")
-    expect(source).toContain("type: 'api.response_completed'")
     expect(source).toContain("type: 'api.retry'")
     expect(source).toContain("type: 'api.error'")
-    expect(traceTypesSource).toContain("| 'api.response_completed'")
+    expect(source).not.toContain("type: 'api.response_completed'")
+    expect(traceTypesSource).not.toContain("| 'api.response_completed'")
   })
 
   test('keeps API tracepoints behind direct HARNESS_TRACE guards', () => {
@@ -101,30 +109,13 @@ describe('claude API trace instrumentation source boundaries', () => {
     )
   })
 
-  test('emits response_completed only after final usage and stop reason are available', () => {
-    const messageDeltaIndex = source.indexOf("case 'message_delta'")
-    const usageUpdateIndex = source.indexOf(
-      'usage = updateUsage(usage, part.usage)',
-      messageDeltaIndex,
+  test('keeps response summaries on allowed Task 9 events instead of response_completed', () => {
+    expect(source).toContain(
+      'usage: summarizeUsageForTrace(message.message.usage)',
     )
-    const stopReasonIndex = source.indexOf(
-      'stopReason = part.delta.stop_reason',
-      messageDeltaIndex,
-    )
-    const responseCompletedIndex = source.indexOf(
-      "type: 'api.response_completed'",
-    )
-    const successLogIndex = source.indexOf('logAPISuccessAndDuration({')
-
-    expect(messageDeltaIndex).toBeGreaterThanOrEqual(0)
-    expect(usageUpdateIndex).toBeGreaterThan(messageDeltaIndex)
-    expect(stopReasonIndex).toBeGreaterThan(usageUpdateIndex)
-    expect(responseCompletedIndex).toBeGreaterThan(stopReasonIndex)
-    expect(responseCompletedIndex).toBeLessThan(successLogIndex)
-    expect(source).toContain('usage: summarizeUsageForTrace(input.usage)')
-    expect(source).toContain('usage,')
-    expect(source).toContain('stopReason')
-    expect(source).toContain('assistantMessageCount: newMessages.length')
+    expect(source).toContain('stopReason: message.message.stop_reason')
+    expect(source).toContain('buildAPIStreamEventTracePayload(')
+    expect(source).toContain("case 'message_delta'")
     expect(source).not.toContain('responseText')
     expect(source).not.toContain('messageContent')
   })
@@ -208,6 +199,7 @@ describe('claude API trace instrumentation behavior boundaries', () => {
       payload: {
         attempt: 2,
         betaCount: 1,
+        betaFlags: ['beta-a'],
         clientRequestId: 'client-1',
         maxTokens: 128,
         messageCount: 1,
@@ -313,7 +305,7 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     })
   })
 
-  test('payload builders exclude raw prompt text, stream deltas, and auth header values', () => {
+  test('learn-mode stream payloads keep only tracing metadata and drop raw content details', () => {
     const requestPayload = claudeApiTraceInternals.buildAPIRequestTracePayload(
       {
         model: 'claude-test',
@@ -324,6 +316,7 @@ describe('claude API trace instrumentation behavior boundaries', () => {
             content: [{ type: 'text', text: 'top secret prompt text' }],
           },
         ],
+        betas: ['beta-a', 'beta-b'],
         headers: {
           authorization: 'Bearer super-secret',
         },
@@ -340,11 +333,15 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     const streamPayload =
       claudeApiTraceInternals.buildAPIStreamEventTracePayload(
         {
-          type: 'content_block_delta',
+          type: 'content_block_start',
           index: 0,
-          delta: {
-            type: 'text_delta',
-            text: 'raw delta text should not be recorded',
+          content_block: {
+            type: 'tool_use',
+            id: 'toolu_123',
+            name: 'dangerous_tool_name',
+            input: {
+              prompt: 'raw tool input should not be recorded',
+            },
           },
         } as unknown as BetaRawMessageStreamEvent,
         {
@@ -354,10 +351,13 @@ describe('claude API trace instrumentation behavior boundaries', () => {
           provider: 'firstParty',
           requestId: 'req_stream',
         },
+        'learn',
       )
 
     expect(requestPayload).toMatchObject({
       attempt: 1,
+      betaCount: 2,
+      betaFlags: ['beta-a', 'beta-b'],
       clientRequestId: 'client-1',
       maxTokens: 256,
       messageCount: 1,
@@ -370,9 +370,10 @@ describe('claude API trace instrumentation behavior boundaries', () => {
       attempt: 1,
       clientRequestId: 'client-1',
       contentBlockIndex: 0,
-      deltaType: 'text_delta',
+      contentBlockId: 'toolu_123',
+      contentBlockType: 'tool_use',
       elapsedMs: 42,
-      eventType: 'content_block_delta',
+      eventType: 'content_block_start',
       provider: 'firstParty',
       requestId: 'req_stream',
     })
@@ -384,8 +385,174 @@ describe('claude API trace instrumentation behavior boundaries', () => {
     expect(serializedRequestPayload).not.toContain('super-secret')
     expect(serializedRequestPayload).not.toContain('authorization')
     expect(serializedStreamPayload).not.toContain(
-      'raw delta text should not be recorded',
+      'raw tool input should not be recorded',
     )
-    expect(serializedStreamPayload).not.toContain('"text"')
+    expect(serializedStreamPayload).not.toContain('dangerous_tool_name')
+    expect(serializedStreamPayload).not.toContain('usage')
+    expect(serializedStreamPayload).not.toContain('stopReason')
+    expect(serializedStreamPayload).not.toContain('rawEvent')
+  })
+
+  test('full-mode stream payloads include a redacted raw event copy', () => {
+    const fullPayload = claudeApiTraceInternals.buildAPIStreamEventTracePayload(
+      {
+        type: 'content_block_delta',
+        index: 0,
+        delta: {
+          type: 'text_delta',
+          text: 'Bearer secret-token',
+        },
+      } as unknown as BetaRawMessageStreamEvent,
+      {
+        attempt: 3,
+        clientRequestId: 'client-1',
+        elapsedMs: 64,
+        provider: 'firstParty',
+        requestId: 'req_stream',
+        timeSincePreviousEventMs: 7,
+      },
+      'full',
+    )
+
+    expect(fullPayload).toMatchObject({
+      attempt: 3,
+      clientRequestId: 'client-1',
+      contentBlockIndex: 0,
+      deltaType: 'text_delta',
+      elapsedMs: 64,
+      eventType: 'content_block_delta',
+      provider: 'firstParty',
+      rawEvent: {
+        delta: {
+          text: 'Bearer secret-token',
+          type: 'text_delta',
+        },
+        index: 0,
+        type: 'content_block_delta',
+      },
+      requestId: 'req_stream',
+      timeSincePreviousEventMs: 7,
+    })
+
+    const redactedPayload = redactTracePayload(fullPayload, 'full')
+    const serializedRedactedPayload = JSON.stringify(redactedPayload)
+
+    expect(serializedRedactedPayload).toContain('"rawEvent"')
+    expect(serializedRedactedPayload).not.toContain('secret-token')
+    expect(serializedRedactedPayload).toContain('[REDACTED]')
+  })
+
+  test('withRetry exposes fallback-model trace metadata when the retry loop switches models', async () => {
+    const traceEvents: unknown[] = []
+    const overloadedError = new APIError(
+      529,
+      { error: { type: 'overloaded_error' }, message: 'overloaded' },
+      undefined,
+      new Headers([['request-id', 'req-fallback']]),
+      'overloaded_error',
+    )
+
+    const originalFallbackEnv = process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS
+    process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS = '1'
+
+    try {
+      const generator = withRetry(
+        async () => ({}) as never,
+        async () => {
+          throw overloadedError
+        },
+        {
+          fallbackModel: 'claude-sonnet-fallback',
+          model: 'claude-opus-primary',
+          onRetryTrace: event => {
+            traceEvents.push(event)
+          },
+          provider: 'firstParty',
+          thinkingConfig: { type: 'disabled' },
+        },
+      )
+
+      await expect(generator.next()).resolves.toMatchObject({ done: false })
+      await expect(generator.next()).resolves.toMatchObject({ done: false })
+      await expect(generator.next()).rejects.toBeInstanceOf(
+        FallbackTriggeredError,
+      )
+    } finally {
+      if (originalFallbackEnv === undefined) {
+        delete process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS
+      } else {
+        process.env.FALLBACK_FOR_ALL_PRIMARY_MODELS = originalFallbackEnv
+      }
+    }
+
+    expect(traceEvents).toEqual([
+      {
+        attempt: 3,
+        fallbackModel: 'claude-sonnet-fallback',
+        maxRetries: 10,
+        model: 'claude-opus-primary',
+        provider: 'firstParty',
+        retryType: 'fallback_model_selected',
+        status: 529,
+      },
+    ])
+  })
+
+  test('withRetry exposes max-token retry metadata when it shrinks the next attempt budget', async () => {
+    const traceEvents: unknown[] = []
+    const overflowError = new APIError(
+      400,
+      {
+        error: { type: 'invalid_request_error' },
+        message:
+          'input length and `max_tokens` exceed context limit: 188059 + 20000 > 200000',
+      },
+      undefined,
+      new Headers([['request-id', 'req-overflow']]),
+      'invalid_request_error',
+    )
+    const contexts: Array<{ maxTokensOverride?: number }> = []
+
+    const generator = withRetry(
+      async () => ({}) as never,
+      async (_client, attempt, context) => {
+        contexts.push({ maxTokensOverride: context.maxTokensOverride })
+        if (attempt === 1) {
+          throw overflowError
+        }
+        return 'ok'
+      },
+      {
+        model: 'claude-test',
+        onRetryTrace: event => {
+          traceEvents.push(event)
+        },
+        provider: 'firstParty',
+        thinkingConfig: { type: 'disabled' },
+      },
+    )
+
+    await expect(generator.next()).resolves.toEqual({
+      done: true,
+      value: 'ok',
+    })
+
+    expect(contexts).toEqual([
+      { maxTokensOverride: undefined },
+      { maxTokensOverride: 10941 },
+    ])
+    expect(traceEvents).toEqual([
+      {
+        adjustedMaxTokens: 10941,
+        attempt: 1,
+        contextLimit: 200000,
+        inputTokens: 188059,
+        maxRetries: 10,
+        model: 'claude-test',
+        provider: 'firstParty',
+        retryType: 'max_tokens_retry_triggered',
+        status: 400,
+      },
+    ])
   })
 })

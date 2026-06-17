@@ -124,12 +124,27 @@ export interface RetryContext {
   fastMode?: boolean
 }
 
+export interface APIRetryTraceDetails {
+  adjustedMaxTokens?: number
+  attempt: number
+  contextLimit?: number
+  fallbackModel?: string
+  inputTokens?: number
+  maxRetries: number
+  model: string
+  provider?: string
+  retryType: 'fallback_model_selected' | 'max_tokens_retry_triggered'
+  status?: number
+}
+
 interface RetryOptions {
   maxRetries?: number
   model: string
   fallbackModel?: string
   thinkingConfig: ThinkingConfig
   fastMode?: boolean
+  onRetryTrace?: (event: APIRetryTraceDetails) => void
+  provider?: string
   signal?: AbortSignal
   querySource?: QuerySource
   /**
@@ -343,6 +358,16 @@ export async function* withRetry<T>(
               provider: getAPIProviderForStatsig(),
             })
 
+            options.onRetryTrace?.({
+              attempt,
+              fallbackModel: options.fallbackModel,
+              maxRetries,
+              model: options.model,
+              provider: options.provider,
+              retryType: 'fallback_model_selected',
+              status: error instanceof APIError ? error.status : undefined,
+            })
+
             // Throw special error to indicate fallback was triggered
             throw new FallbackTriggeredError(
               options.model,
@@ -420,6 +445,18 @@ export async function* withRetry<T>(
             contextLimit,
             adjustedMaxTokens,
             attempt,
+          })
+
+          options.onRetryTrace?.({
+            adjustedMaxTokens,
+            attempt,
+            contextLimit,
+            inputTokens,
+            maxRetries,
+            model: options.model,
+            provider: options.provider,
+            retryType: 'max_tokens_retry_triggered',
+            status: error.status,
           })
 
           continue

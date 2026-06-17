@@ -14,7 +14,6 @@ export type TraceEventType =
   | 'api.request_built'
   | 'api.stream_event'
   | 'api.assistant_message'
-  | 'api.response_completed'
   | 'api.error'
   | 'api.retry'
   | 'tool.detected'
