@@ -520,6 +520,203 @@ describe('trace live stream', () => {
     }
   })
 
+  test('coalesces repeated Learn transcript appends for the same entry type within a turn', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [
+              { type: 'user', message: { content: 'start noisy turn' } },
+            ],
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'user',
+            byteCount: 111,
+            body: 'FIRST USER BODY SHOULD NOT PRINT',
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'user',
+            byteCount: 222,
+            body: 'SECOND USER BODY SHOULD NOT PRINT',
+          },
+        }),
+      ],
+      'learn',
+    )
+
+    expect(output.match(/transcript appended entry=user/g)).toHaveLength(1)
+    expect(output).toContain('transcript appended entry=user bytes=111')
+    expect(output).not.toContain('bytes=222')
+    expect(output).not.toContain('FIRST USER BODY SHOULD NOT PRINT')
+    expect(output).not.toContain('SECOND USER BODY SHOULD NOT PRINT')
+  })
+
+  test('resets Learn transcript append coalescing on the next main turn', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [{ type: 'user', message: { content: 'first turn' } }],
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: { entryType: 'assistant', byteCount: 333 },
+        }),
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [{ type: 'user', message: { content: 'second turn' } }],
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: { entryType: 'assistant', byteCount: 444 },
+        }),
+      ],
+      'learn',
+    )
+
+    expect(output.match(/transcript appended entry=assistant/g)).toHaveLength(2)
+    expect(output).toContain('transcript appended entry=assistant bytes=333')
+    expect(output).toContain('transcript appended entry=assistant bytes=444')
+  })
+
+  test('renders repeated meaningful transcript appends in Deep', () => {
+    const output = render(
+      [
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'system',
+            byteCount: 555,
+            body: 'FIRST SYSTEM BODY SHOULD NOT PRINT',
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'system',
+            byteCount: 666,
+            body: 'SECOND SYSTEM BODY SHOULD NOT PRINT',
+          },
+        }),
+      ],
+      'deep',
+    )
+
+    expect(output.match(/transcript appended entry=system/g)).toHaveLength(2)
+    expect(output).toContain('transcript appended entry=system bytes=555')
+    expect(output).toContain('transcript appended entry=system bytes=666')
+    expect(output).not.toContain('FIRST SYSTEM BODY SHOULD NOT PRINT')
+    expect(output).not.toContain('SECOND SYSTEM BODY SHOULD NOT PRINT')
+  })
+
+  test('summarizes attachment transcript appends without leaking body or path', () => {
+    const output = render(
+      [
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'attachment',
+            byteCount: 777,
+            path: 'C:\\Users\\asuka\\secret\\notes.md',
+            body: 'ATTACHMENT BODY SHOULD NOT PRINT',
+          },
+        }),
+      ],
+      'learn',
+    )
+
+    expect(output).toContain('transcript appended entry=attachment bytes=777')
+    expect(output).not.toContain('ATTACHMENT BODY SHOULD NOT PRINT')
+    expect(output).not.toContain('C:\\Users\\asuka\\secret\\notes.md')
+  })
+
+  test('drops metadata-like transcript appends without leaking body or path', () => {
+    const records = [
+      event({
+        type: 'transcript.appended',
+        source: 'transcript',
+        payload: {
+          entryType: 'title',
+          byteCount: 888,
+          path: 'C:\\Users\\asuka\\secret\\title.jsonl',
+          body: 'TITLE BODY SHOULD NOT PRINT',
+        },
+      }),
+      event({
+        type: 'transcript.appended',
+        source: 'transcript',
+        payload: {
+          entryType: 'tag',
+          byteCount: 999,
+          path: 'C:\\Users\\asuka\\secret\\tag.jsonl',
+          body: 'TAG BODY SHOULD NOT PRINT',
+        },
+      }),
+    ]
+
+    for (const depth of ['learn', 'deep'] as const) {
+      const output = render(records, depth)
+
+      expect(output).not.toContain('transcript appended entry=title')
+      expect(output).not.toContain('transcript appended entry=tag')
+      expect(output).not.toContain('TITLE BODY SHOULD NOT PRINT')
+      expect(output).not.toContain('TAG BODY SHOULD NOT PRINT')
+      expect(output).not.toContain('C:\\Users\\asuka\\secret')
+    }
+  })
+
+  test('summarizes unknown side query sources without leaking raw body or path', () => {
+    const records = [
+      event({
+        type: 'api.request_built',
+        source: 'api',
+        payload: {
+          querySource:
+            'custom side BODY SHOULD NOT PRINT C:\\Users\\asuka\\secret\\payload.jsonl',
+          model: 'deepseek-v4-pro',
+          messageCount: 1,
+          toolCount: 0,
+          rawRequestParams: {
+            messages: 'UNKNOWN SIDE BODY SHOULD NOT PRINT',
+          },
+        },
+      }),
+    ]
+
+    for (const depth of ['learn', 'deep'] as const) {
+      const output = render(records, depth)
+
+      expect(output).toContain('unknown_side')
+      expect(output).not.toContain('custom side BODY SHOULD NOT PRINT')
+      expect(output).not.toContain('UNKNOWN SIDE BODY SHOULD NOT PRINT')
+      expect(output).not.toContain('C:\\Users\\asuka\\secret')
+    }
+  })
+
   test('renders store summaries for trace session boundaries', () => {
     const records = [
       event({

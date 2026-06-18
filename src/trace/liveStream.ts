@@ -76,6 +76,7 @@ interface TraceLiveState {
   requestNumber: number
   currentRequestNumber: number
   shownToolUseIds: Set<string>
+  learnTranscriptStoreEntryTypesSeen: Set<string>
   learnLoopBackRenderedBeforeLoopEnd: boolean
   color: boolean
   pendingMessageCounts?: MessageCounts
@@ -106,6 +107,7 @@ export function createTraceLiveStream(
     requestNumber: 0,
     currentRequestNumber: 0,
     shownToolUseIds: new Set(),
+    learnTranscriptStoreEntryTypesSeen: new Set(),
     learnLoopBackRenderedBeforeLoopEnd: false,
     color: options.color ?? false,
   }
@@ -162,7 +164,7 @@ function renderRecordLines(
     case 'hook.result':
       return renderHook(record.type, payload, depth, state.color)
     case 'transcript.appended':
-      return renderTranscriptAppend(payload, state)
+      return renderTranscriptAppend(payload, state, depth)
     case 'query.loop_end':
       return renderLoopEnd(payload, state, depth)
     case 'turn.end':
@@ -208,6 +210,7 @@ function renderTurnStart(
 
   state.turnNumber += 1
   state.learnLoopBackRenderedBeforeLoopEnd = false
+  state.learnTranscriptStoreEntryTypesSeen.clear()
   state.pendingMessageCounts = summarizeMessages(payload.messages)
 
   const userText =
@@ -592,11 +595,35 @@ function renderHook(
 function renderTranscriptAppend(
   payload: Record<string, unknown>,
   state: TraceLiveState,
+  depth: TraceLiveDepth,
 ): string[] {
   const entryType = getString(payload, 'entryType') ?? 'entry'
 
-  if (!isTranscriptStoreEntry(entryType)) {
-    return []
+  const lines: string[] = []
+
+  if (depth === 'learn' && entryType === 'tool_result') {
+    if (!state.learnLoopBackRenderedBeforeLoopEnd) {
+      lines.push(
+        ...stageLine(
+          'DECISION',
+          'tool_result appended, loop back to LLM',
+          state.color,
+        ),
+      )
+      state.learnLoopBackRenderedBeforeLoopEnd = true
+    }
+  }
+
+  if (!shouldRenderTranscriptStoreEntry(entryType)) {
+    return lines
+  }
+
+  if (depth === 'learn') {
+    if (state.learnTranscriptStoreEntryTypesSeen.has(entryType)) {
+      return lines
+    }
+
+    state.learnTranscriptStoreEntryTypesSeen.add(entryType)
   }
 
   const byteCount = getNumber(payload, 'byteCount')
@@ -606,7 +633,8 @@ function renderTranscriptAppend(
     parts.push(`bytes=${byteCount}`)
   }
 
-  return stageLine('STORE', parts.join(' '), state.color)
+  lines.push(...stageLine('STORE', parts.join(' '), state.color))
+  return lines
 }
 
 function renderTraceSession(
@@ -862,29 +890,31 @@ function isMainQuerySource(querySource: string | undefined): boolean {
 }
 
 function formatSideSource(source: string): string {
-  if (source.includes('memory')) {
+  if (
+    source === 'generate_session_title' ||
+    source === 'prompt_suggestion' ||
+    source === 'away_summary' ||
+    source === 'extract_memories' ||
+    source === 'session_memory'
+  ) {
     return source
   }
 
-  if (source === 'generate_session_title') {
-    return 'generate_session_title'
+  if (/^[A-Za-z0-9_.:-]{1,64}$/.test(source)) {
+    return source
   }
 
-  if (source === 'prompt_suggestion') {
-    return 'prompt_suggestion'
-  }
-
-  if (source === 'away_summary') {
-    return 'away_summary'
-  }
-
-  return source
+  return 'unknown_side'
 }
 
-function isTranscriptStoreEntry(entryType: string): boolean {
+// STORE summaries are intentionally shape-only. Known transcript entries are
+// useful lifecycle signals; metadata-like entries such as title/tag are omitted
+// because echoing opaque fields can leak body text or file paths.
+function shouldRenderTranscriptStoreEntry(entryType: string): boolean {
   return (
     entryType === 'user' ||
     entryType === 'assistant' ||
+    entryType === 'attachment' ||
     entryType === 'tool_result' ||
     entryType === 'system'
   )
