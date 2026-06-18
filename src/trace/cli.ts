@@ -1,4 +1,12 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  statSync,
+} from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import { loadTraceConfig, saveTraceConfig } from './config.js'
 import {
@@ -7,6 +15,11 @@ import {
   getTraceRootDir,
 } from './paths.js'
 import { parseTraceJsonLine, type TraceDisplayRecord } from './format.js'
+import {
+  createTraceLiveStream,
+  renderTraceLiveHeader,
+  type TraceLiveStream,
+} from './liveStream.js'
 import { formatTracePanel } from './panel.js'
 import { TRACE_TAIL_COMMAND } from './liveWindow.js'
 import { clearActiveTraceSession, readActiveTraceSession } from './store.js'
@@ -20,6 +33,7 @@ export interface TraceTailOptions {
   follow?: boolean
   pollIntervalMs?: number
   idleTimeoutMs?: number
+  startAtEnd?: boolean
 }
 
 export interface TraceMainOptions {
@@ -41,8 +55,25 @@ interface TraceSessionListing {
   sortTimestamp: number
 }
 
+interface TailContinuityMarker {
+  offset: number
+  bytes: Buffer
+}
+
+interface TailReadChunk {
+  text: string
+  bytesRead: number
+}
+
+interface TailReadBytes {
+  bytes: Buffer
+  bytesRead: number
+}
+
+const TAIL_CONTINUITY_MARKER_BYTES = 64
+
 const USAGE =
-  'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--raw]|replay <sessionId> [--raw]|inspect <sessionId>'
+  'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--deep] [--raw]|replay <sessionId> [--raw]|inspect <sessionId>'
 
 export async function traceMain(
   args: string[],
@@ -88,6 +119,7 @@ export async function traceMain(
           io,
           options.tail,
           hasRawFlag(args),
+          hasDeepFlag(args),
         )
         return 0
       case '-h':
@@ -311,6 +343,7 @@ async function writeTail(
   io: TraceIo,
   options: TraceTailOptions = {},
   raw = false,
+  deep = false,
 ): Promise<void> {
   const target = getTailTarget(requestedSessionId)
 
@@ -331,50 +364,94 @@ async function writeTail(
   }
 
   const follow = options.follow ?? true
-  const pollIntervalMs = options.pollIntervalMs ?? 500
-  let processedLineCount = 0
+  const pollIntervalMs = options.pollIntervalMs ?? 250
+  const startAtEnd = options.startAtEnd ?? follow
+  let offset = startAtEnd ? statSync(target.eventsPath).size : 0
+  let continuityMarker = readTailContinuityMarker(target.eventsPath, offset)
+  if (offset > 0 && continuityMarker === null) {
+    offset = 0
+  }
+
+  let pending = ''
   let idleStartedAt = Date.now()
-  const records: TraceDisplayRecord[] = []
+  const depth = deep ? 'deep' : 'learn'
+  const stream = createTraceLiveStream({ depth })
+
+  if (!raw) {
+    writeText(
+      io.stdout,
+      renderTraceLiveHeader({
+        depth,
+        sessionId: target.sessionId,
+        eventsPath: target.eventsPath,
+      }),
+    )
+  }
 
   for (;;) {
-    const lines = readNonEmptyLines(target.eventsPath)
-    const newLines =
-      lines.length < processedLineCount
-        ? lines
-        : lines.slice(processedLineCount)
+    const stat = statSync(target.eventsPath)
 
-    if (lines.length < processedLineCount) {
-      processedLineCount = 0
-      records.length = 0
+    if (stat.size < offset) {
+      offset = 0
+      pending = ''
+      continuityMarker = null
+    } else if (
+      offset > 0 &&
+      !tailContinuityMarkerMatches(
+        target.eventsPath,
+        stat.size,
+        continuityMarker,
+      )
+    ) {
+      offset = 0
+      pending = ''
+      continuityMarker = null
     }
 
-    if (newLines.length > 0) {
-      if (raw) {
-        for (const line of newLines) {
-          writeText(io.stdout, `${line}\n`)
-        }
+    if (stat.size > offset) {
+      const chunk = readFileChunk(target.eventsPath, offset, stat.size - offset)
+
+      if (chunk.bytesRead === 0) {
+        offset = 0
+        pending = ''
+        continuityMarker = null
       } else {
-        for (let index = 0; index < newLines.length; index += 1) {
-          const record = parseTraceJsonLine(newLines[index]!, {
-            sessionId: target.sessionId,
-            lineNumber: processedLineCount + index + 1,
-          })
-          records.push(record)
-        }
-
-        writeText(
-          io.stdout,
-          `${follow ? '\x1b[2J\x1b[H' : ''}${formatTracePanel(records, {
-            title: 'Agent Loop Live',
-          })}`,
+        const nextOffset = offset + chunk.bytesRead
+        const nextMarker = readTailContinuityMarker(
+          target.eventsPath,
+          nextOffset,
         )
-      }
 
-      processedLineCount = lines.length
-      idleStartedAt = Date.now()
+        if (nextOffset > 0 && nextMarker === null) {
+          offset = 0
+          pending = ''
+          continuityMarker = null
+        } else {
+          offset = nextOffset
+          continuityMarker = nextMarker
+          pending += chunk.text
+
+          const lines = pending.split(/\r?\n/)
+          pending = lines.pop() ?? ''
+          const completeLines = lines.filter(line => line.trim().length > 0)
+
+          for (const line of completeLines) {
+            writeTailLine(line, target.sessionId, io, raw, stream)
+          }
+
+          if (completeLines.length > 0) {
+            idleStartedAt = Date.now()
+          }
+        }
+      }
     }
 
     if (!follow) {
+      if (pending.trim().length > 0) {
+        writeTailLine(pending, target.sessionId, io, raw, stream)
+        pending = ''
+      }
+
       return
     }
 
@@ -422,6 +499,129 @@ function readNonEmptyLines(path: string): string[] {
     .filter(line => line.trim().length > 0)
 }
 
+function readFileChunk(
+  path: string,
+  offset: number,
+  length: number,
+): TailReadChunk {
+  const result = readFileBytes(path, offset, length)
+
+  return {
+    text: result.bytes.toString('utf8'),
+    bytesRead: result.bytesRead,
+  }
+}
+
+function readFileBytes(
+  path: string,
+  offset: number,
+  length: number,
+): TailReadBytes {
+  if (length <= 0) {
+    return {
+      bytes: Buffer.alloc(0),
+      bytesRead: 0,
+    }
+  }
+
+  const fd = openSync(path, 'r')
+
+  try {
+    const buffer = Buffer.alloc(length)
+    const bytesRead = readSync(fd, buffer, 0, length, offset)
+    return {
+      bytes: buffer.subarray(0, bytesRead),
+      bytesRead,
+    }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function readTailContinuityMarker(
+  path: string,
+  offset: number,
+): TailContinuityMarker | null {
+  if (offset <= 0) {
+    return null
+  }
+
+  const length = Math.min(TAIL_CONTINUITY_MARKER_BYTES, offset)
+  const markerOffset = offset - length
+  const result = readFileBytes(path, markerOffset, length)
+
+  if (result.bytesRead !== length || result.bytesRead === 0) {
+    return null
+  }
+
+  return {
+    offset: markerOffset,
+    bytes: result.bytes,
+  }
+}
+
+function tailContinuityMarkerMatches(
+  path: string,
+  fileSize: number,
+  marker: TailContinuityMarker | null,
+): boolean {
+  if (marker === null) {
+    return false
+  }
+
+  if (marker.bytes.length === 0) {
+    return false
+  }
+
+  if (fileSize < marker.offset + marker.bytes.length) {
+    return false
+  }
+
+  const result = readFileBytes(path, marker.offset, marker.bytes.length)
+  if (result.bytesRead !== marker.bytes.length) {
+    return false
+  }
+
+  return result.bytes.equals(marker.bytes)
+}
+
+export function readTraceTailChunkForTesting(
+  path: string,
+  offset: number,
+  length: number,
+): TailReadChunk {
+  return readFileChunk(path, offset, length)
+}
+
+export function readTraceTailContinuityMarkerForTesting(
+  path: string,
+  offset: number,
+): TailContinuityMarker | null {
+  return readTailContinuityMarker(path, offset)
+}
+
+function writeTailLine(
+  line: string,
+  sessionId: string,
+  io: TraceIo,
+  raw: boolean,
+  stream: TraceLiveStream,
+): void {
+  if (raw) {
+    writeText(io.stdout, `${line}\n`)
+    return
+  }
+
+  const record = parseTraceJsonLine(line, {
+    sessionId,
+    lineNumber: 0,
+  })
+
+  for (const rendered of stream.renderRecord(record)) {
+    writeText(io.stdout, rendered)
+  }
+}
+
 function getLastTimestamp(records: TraceDisplayRecord[]): string | null {
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const timestamp = records[index]?.timestamp
@@ -449,6 +649,10 @@ function requireSessionId(
 
 function hasRawFlag(args: string[]): boolean {
   return args.includes('--raw')
+}
+
+function hasDeepFlag(args: string[]): boolean {
+  return args.includes('--deep')
 }
 
 function getFirstNonFlagArg(args: string[]): string | undefined {

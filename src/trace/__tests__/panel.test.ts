@@ -25,6 +25,30 @@ function record(
 }
 
 describe('formatTracePanel', () => {
+  test('formats Last timestamp as local human time instead of raw UTC', () => {
+    const panel = formatTracePanel(
+      [
+        record({
+          type: 'turn.start',
+          source: 'query',
+          timestamp: '2026-06-17T16:03:47.556Z',
+          payload: {
+            messages: [
+              {
+                type: 'user',
+                message: { content: 'hello' },
+              },
+            ],
+          },
+        }),
+      ],
+      { title: 'Agent Loop Replay' },
+    )
+
+    expect(panel).toContain('Last:')
+    expect(panel).not.toContain('Last: 2026-06-17T16:03:47.556Z')
+  })
+
   test('collapses internal context and large tool inputs by default', () => {
     const panel = formatTracePanel(
       [

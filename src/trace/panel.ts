@@ -1,4 +1,5 @@
 import type { TraceDisplayRecord } from './format.js'
+import { formatTraceLocalTime } from './time.js'
 
 type PanelSection =
   | 'USER'
@@ -48,7 +49,7 @@ export function formatTracePanel(
     options.title,
     `Session: ${lastRecord.sessionId}`,
     `Events: ${records.length}`,
-    `Last: ${lastRecord.timestamp}`,
+    `Last: ${formatTraceLocalTime(lastRecord.timestamp)}`,
     `Pattern: ${AGENT_LOOP_PATTERN}`,
     '',
   ]

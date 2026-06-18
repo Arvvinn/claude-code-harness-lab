@@ -10,6 +10,7 @@ import {
 } from '../../../trace/bus.js'
 import { loadTraceConfig } from '../../../trace/config.js'
 import {
+  TRACE_TAIL_DEEP_COMMAND,
   resetTraceTailWindowForTesting,
   setTraceTailWindowSpawnForTesting,
 } from '../../../trace/liveWindow.js'
@@ -90,6 +91,10 @@ describe('/trace command', () => {
       type: 'display',
       value: expect.stringContaining('Session: none'),
     })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('Tail: claude trace tail'),
+    })
     expect(readTraceEvents(sessionId!).map(event => event.type)).toEqual([
       'trace.session_start',
       'trace.session_end',
@@ -156,6 +161,38 @@ describe('/trace command', () => {
     })
   })
 
+  test('full reports the deep tail command', async () => {
+    const { call } = await import('../trace.js')
+
+    const result = await call('full', makeContext())
+    await flushTraceForTesting()
+
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('Tail: claude trace tail --deep'),
+    })
+  })
+
+  test('full launches a deep tail after learn launched a shallow tail', async () => {
+    const { call } = await import('../trace.js')
+    const calls: Array<{ executable: string; args: string[] }> = []
+    setTraceTailWindowSpawnForTesting(async (executable, args) => {
+      calls.push({ executable, args })
+      return { ok: true }
+    })
+
+    await call('learn', makeContext())
+    const result = await call('full', makeContext())
+    await flushTraceForTesting()
+
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('Tail: claude trace tail --deep'),
+    })
+    expect(calls).toHaveLength(2)
+    expect(calls[1]?.args.join(' ')).toContain(TRACE_TAIL_DEEP_COMMAND)
+  })
+
   test('learn after off uses monotonic sequence in the same process', async () => {
     const { call } = await import('../trace.js')
 
@@ -187,6 +224,10 @@ describe('/trace command', () => {
     expect(result).toEqual({
       type: 'display',
       value: expect.stringContaining('claude trace tail'),
+    })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('claude trace tail --deep'),
     })
     expect(readActiveTraceSession()).toBeNull()
   })
