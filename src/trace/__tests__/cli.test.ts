@@ -1050,6 +1050,61 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('old outside bounded window')
   })
 
+  test('tail orientation keeps a full record when the bounded window starts on a line boundary', async () => {
+    const oldMain = JSON.stringify(
+      makeTraceEvent({
+        eventId: 'event-old-main-before-window',
+        sequence: 1,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'old main before line boundary' },
+            },
+          ],
+        },
+      }),
+    )
+    const latestMain = JSON.stringify(
+      makeTraceEvent({
+        eventId: 'event-latest-main-at-window-start',
+        sequence: 2,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'latest main at window start' },
+            },
+          ],
+        },
+      }),
+    )
+    const firstLine = `${oldMain}\n`
+    const secondLine = `${latestMain}\n`
+    const eventsPath = getTraceEventsPath('session-1')
+
+    await mkdir(dirname(eventsPath), { recursive: true })
+    await writeFile(eventsPath, `${firstLine}${secondLine}`)
+
+    const snapshot = readTraceTailOrientationRecordsForTesting(
+      'session-1',
+      eventsPath,
+      Buffer.byteLength(firstLine) + Buffer.byteLength(secondLine),
+      Buffer.byteLength(secondLine),
+    )
+
+    expect(snapshot.bytesRead).toBe(Buffer.byteLength(secondLine))
+    expect(snapshot.records.map(record => record.eventId)).toEqual([
+      'event-latest-main-at-window-start',
+    ])
+  })
+
   test('inspect prints a JSON summary with counts by type and source', async () => {
     appendTraceEvent(makeTraceEvent({ type: 'turn.start', source: 'repl' }))
     appendTraceEvent(

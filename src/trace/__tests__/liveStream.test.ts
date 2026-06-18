@@ -344,6 +344,54 @@ describe('trace live stream', () => {
     expect(output).not.toContain('HOOK COMMAND SHOULD NOT PRINT')
   })
 
+  test('does not duplicate Deep harness context when turn start already has it', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [
+              { type: 'user', message: { content: 'inspect harness once' } },
+            ],
+            systemPrompt: [
+              { type: 'text', text: 'PROMPT BODY SHOULD NOT PRINT' },
+            ],
+            userContext: { claudeMd: 'CLAUDE MD SHOULD NOT PRINT' },
+            systemContext: { gitStatus: 'GIT STATUS SHOULD NOT PRINT' },
+          },
+        }),
+        event({
+          type: 'query.loop_start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            loopIndex: 1,
+            messages: [
+              { type: 'user', message: { content: 'inspect harness once' } },
+            ],
+            systemPrompt: [
+              { type: 'text', text: 'PROMPT BODY SHOULD NOT PRINT' },
+            ],
+            userContext: { claudeMd: 'CLAUDE MD SHOULD NOT PRINT' },
+            systemContext: { gitStatus: 'GIT STATUS SHOULD NOT PRINT' },
+            tools: [{ name: 'Read' }],
+          },
+        }),
+      ],
+      'deep',
+    )
+
+    expect(output.match(/HARNESS context/g)).toHaveLength(1)
+    expect(output).toContain(
+      'LOOP #1 messages=1 tools=1 querySource=repl_main_thread',
+    )
+    expect(output).not.toContain('PROMPT BODY SHOULD NOT PRINT')
+    expect(output).not.toContain('CLAUDE MD SHOULD NOT PRINT')
+    expect(output).not.toContain('GIT STATUS SHOULD NOT PRINT')
+  })
+
   test('fills sparse turn start details from query loop start without leaking raw bodies', () => {
     const records = [
       event({
@@ -401,6 +449,7 @@ describe('trace live stream', () => {
     expect(deep).toContain(
       'HARNESS context systemPrompt=1 block userContext=collapsed systemContext=collapsed',
     )
+    expect(deep.match(/HARNESS context/g)).toHaveLength(1)
     expect(deep).not.toContain('SYSTEM BODY SHOULD NOT PRINT')
     expect(deep).not.toContain('PROMPT BODY SHOULD NOT PRINT')
     expect(deep).not.toContain('CLAUDE MD SHOULD NOT PRINT')

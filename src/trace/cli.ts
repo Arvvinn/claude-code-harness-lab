@@ -644,10 +644,26 @@ function readTailOrientationRecords(
   return {
     records: readTraceRecordsFromText(
       sessionId,
-      readOffset === 0 ? snapshot.text : dropFirstPartialLine(snapshot.text),
+      startsAtLineBoundary(eventsPath, readOffset)
+        ? snapshot.text
+        : dropFirstPartialLine(snapshot.text),
     ),
     bytesRead: snapshot.bytesRead,
   }
+}
+
+function startsAtLineBoundary(path: string, offset: number): boolean {
+  if (offset <= 0) {
+    return true
+  }
+
+  const previousByte = readFileBytes(path, offset - 1, 1)
+  if (previousByte.bytesRead !== 1) {
+    return false
+  }
+
+  const byte = previousByte.bytes[0]
+  return byte === 0x0a || byte === 0x0d
 }
 
 function dropFirstPartialLine(text: string): string {

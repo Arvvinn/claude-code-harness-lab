@@ -83,6 +83,7 @@ interface TraceLiveState {
   learnLoopBackRenderedBeforeLoopEnd: boolean
   color: boolean
   mainTurnHasReadableUser: boolean
+  mainTurnHarnessContextRendered: boolean
   pendingMessageCounts?: MessageCounts
 }
 
@@ -118,6 +119,7 @@ export function createTraceLiveStream(
     learnLoopBackRenderedBeforeLoopEnd: false,
     color: options.color ?? false,
     mainTurnHasReadableUser: false,
+    mainTurnHarnessContextRendered: false,
   }
 
   return {
@@ -229,6 +231,7 @@ function renderTurnStart(
   state.learnBetweenTranscriptStoreEntryTypesSeen.clear()
   state.learnSideTranscriptStoreEntryTypesSeenStack.length = 0
   state.mainTurnHasReadableUser = false
+  state.mainTurnHarnessContextRendered = false
   state.pendingMessageCounts = hasMessages(payload.messages)
     ? summarizeMessages(payload.messages)
     : undefined
@@ -257,7 +260,10 @@ function renderTurnStart(
       state.color,
     ),
   )
-  lines.push(...stageLine('PREP', formatHarnessContext(payload), state.color))
+  if (hasHarnessContext(payload)) {
+    lines.push(...stageLine('PREP', formatHarnessContext(payload), state.color))
+    state.mainTurnHarnessContextRendered = true
+  }
 
   return lines
 }
@@ -303,7 +309,12 @@ function renderQueryLoopStart(
   }
 
   if (depth === 'deep') {
-    lines.push(...stageLine('PREP', formatHarnessContext(payload), state.color))
+    if (!state.mainTurnHarnessContextRendered && hasHarnessContext(payload)) {
+      lines.push(
+        ...stageLine('PREP', formatHarnessContext(payload), state.color),
+      )
+      state.mainTurnHarnessContextRendered = true
+    }
     lines.push(...stageLine('LLM', formatLoopStart(payload), state.color))
   }
 
@@ -936,6 +947,14 @@ function formatHarnessContext(payload: Record<string, unknown>): string {
     `userContext=${formatCollapsedValue(payload.userContext)}`,
     `systemContext=${formatCollapsedValue(payload.systemContext)}`,
   ].join(' ')
+}
+
+function hasHarnessContext(payload: Record<string, unknown>): boolean {
+  return (
+    hasValue(payload.systemPrompt) ||
+    hasValue(payload.userContext) ||
+    hasValue(payload.systemContext)
+  )
 }
 
 function summarizeMessages(messages: unknown): MessageCounts {
