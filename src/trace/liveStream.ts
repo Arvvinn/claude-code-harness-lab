@@ -76,7 +76,10 @@ interface TraceLiveState {
   requestNumber: number
   currentRequestNumber: number
   shownToolUseIds: Set<string>
-  learnTranscriptStoreEntryTypesSeen: Set<string>
+  learnInsideMainTurn: boolean
+  learnMainTranscriptStoreEntryTypesSeen: Set<string>
+  learnBetweenTranscriptStoreEntryTypesSeen: Set<string>
+  learnSideTranscriptStoreEntryTypesSeenStack: Set<string>[]
   learnLoopBackRenderedBeforeLoopEnd: boolean
   color: boolean
   pendingMessageCounts?: MessageCounts
@@ -107,7 +110,10 @@ export function createTraceLiveStream(
     requestNumber: 0,
     currentRequestNumber: 0,
     shownToolUseIds: new Set(),
-    learnTranscriptStoreEntryTypesSeen: new Set(),
+    learnInsideMainTurn: false,
+    learnMainTranscriptStoreEntryTypesSeen: new Set(),
+    learnBetweenTranscriptStoreEntryTypesSeen: new Set(),
+    learnSideTranscriptStoreEntryTypesSeenStack: [],
     learnLoopBackRenderedBeforeLoopEnd: false,
     color: options.color ?? false,
   }
@@ -205,12 +211,19 @@ function renderTurnStart(
   const querySource = getString(payload, 'querySource')
 
   if (!isMainQuerySource(querySource)) {
+    if (depth === 'learn') {
+      state.learnSideTranscriptStoreEntryTypesSeenStack.push(new Set())
+    }
+
     return renderSideTurnStart(payload, querySource, depth, state.color)
   }
 
   state.turnNumber += 1
+  state.learnInsideMainTurn = true
   state.learnLoopBackRenderedBeforeLoopEnd = false
-  state.learnTranscriptStoreEntryTypesSeen.clear()
+  state.learnMainTranscriptStoreEntryTypesSeen.clear()
+  state.learnBetweenTranscriptStoreEntryTypesSeen.clear()
+  state.learnSideTranscriptStoreEntryTypesSeenStack.length = 0
   state.pendingMessageCounts = summarizeMessages(payload.messages)
 
   const userText =
@@ -619,11 +632,13 @@ function renderTranscriptAppend(
   }
 
   if (depth === 'learn') {
-    if (state.learnTranscriptStoreEntryTypesSeen.has(entryType)) {
+    const seenEntryTypes = getLearnTranscriptStoreEntryTypesSeen(state)
+
+    if (seenEntryTypes.has(entryType)) {
       return lines
     }
 
-    state.learnTranscriptStoreEntryTypesSeen.add(entryType)
+    seenEntryTypes.add(entryType)
   }
 
   const byteCount = getNumber(payload, 'byteCount')
@@ -743,7 +758,7 @@ function renderTurnEnd(
 
     const lines = stageLine('DONE', `${resultReason}${duration}`, state.color)
 
-    state.learnTranscriptStoreEntryTypesSeen.clear()
+    updateLearnTranscriptStoreScopeOnTurnEnd(payload, state)
     return lines
   }
 
@@ -759,6 +774,43 @@ function renderTurnEnd(
   }
 
   return stageLine('DONE', parts.join(' '), state.color)
+}
+
+function getLearnTranscriptStoreEntryTypesSeen(
+  state: TraceLiveState,
+): Set<string> {
+  const sideEntryTypesSeen =
+    state.learnSideTranscriptStoreEntryTypesSeenStack[
+      state.learnSideTranscriptStoreEntryTypesSeenStack.length - 1
+    ]
+
+  if (sideEntryTypesSeen !== undefined) {
+    return sideEntryTypesSeen
+  }
+
+  return state.learnInsideMainTurn
+    ? state.learnMainTranscriptStoreEntryTypesSeen
+    : state.learnBetweenTranscriptStoreEntryTypesSeen
+}
+
+function updateLearnTranscriptStoreScopeOnTurnEnd(
+  payload: Record<string, unknown>,
+  state: TraceLiveState,
+): void {
+  const querySource = getString(payload, 'querySource')
+  const isSideTurnEnd =
+    querySource === undefined
+      ? state.learnSideTranscriptStoreEntryTypesSeenStack.length > 0
+      : !isMainQuerySource(querySource)
+
+  if (isSideTurnEnd) {
+    state.learnSideTranscriptStoreEntryTypesSeenStack.pop()
+    return
+  }
+
+  state.learnInsideMainTurn = false
+  state.learnBetweenTranscriptStoreEntryTypesSeen.clear()
+  state.learnSideTranscriptStoreEntryTypesSeenStack.length = 0
 }
 
 function getTurnEndResultReason(payload: Record<string, unknown>): string {

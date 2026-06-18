@@ -562,6 +562,88 @@ describe('trace live stream', () => {
     expect(output).not.toContain('SECOND USER BODY SHOULD NOT PRINT')
   })
 
+  test('isolates Learn transcript append coalescing across nested side turns', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [{ type: 'user', message: { content: 'parent turn' } }],
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'user',
+            byteCount: 111,
+            body: 'PARENT USER BODY SHOULD NOT PRINT',
+          },
+        }),
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'agent:reviewer',
+            messages: [
+              {
+                type: 'user',
+                message: { content: 'SIDE USER BODY SHOULD NOT PRINT' },
+              },
+            ],
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'user',
+            byteCount: 222,
+            body: 'SIDE TRANSCRIPT BODY SHOULD NOT PRINT',
+          },
+        }),
+        event({
+          type: 'turn.end',
+          source: 'query',
+          payload: {
+            querySource: 'agent:reviewer',
+            resultReason: 'completed',
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: {
+            entryType: 'user',
+            byteCount: 333,
+            body: 'PARENT POST SIDE USER BODY SHOULD NOT PRINT',
+          },
+        }),
+        event({
+          type: 'turn.end',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            resultReason: 'completed',
+          },
+        }),
+      ],
+      'learn',
+    )
+
+    expect(output.match(/transcript appended entry=user/g)).toHaveLength(2)
+    expect(output).toContain('transcript appended entry=user bytes=111')
+    expect(output).toContain('transcript appended entry=user bytes=222')
+    expect(output).not.toContain('bytes=333')
+    expect(output).toContain('agent:reviewer collapsed')
+    expect(output).not.toContain('PARENT USER BODY SHOULD NOT PRINT')
+    expect(output).not.toContain('SIDE USER BODY SHOULD NOT PRINT')
+    expect(output).not.toContain('SIDE TRANSCRIPT BODY SHOULD NOT PRINT')
+    expect(output).not.toContain('PARENT POST SIDE USER BODY SHOULD NOT PRINT')
+  })
+
   test('does not coalesce next user transcript append before the next turn start', () => {
     const output = render(
       [
