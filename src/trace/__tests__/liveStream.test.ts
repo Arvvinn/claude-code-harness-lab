@@ -75,15 +75,41 @@ describe('trace live stream', () => {
     expect(output).toContain('\x1b[36m[USER 用户输入]\x1b[0m')
     expect(output).toContain('\x1b[33m[LLM 模型请求]\x1b[0m')
     expect(output).toContain('\x1b[32m[TOOL 工具]\x1b[0m')
-    expect(output).toContain('\x1b[90m  event=turn.start\x1b[0m')
-    expect(output).toContain('\x1b[90m  event=api.request_built\x1b[0m')
+    expect(output).toContain('    \x1b[90mevent=turn.start\x1b[0m')
+    expect(output).toContain('    \x1b[90mevent=api.request_built\x1b[0m')
   })
 
-  test('renders uncolored stage labels when color is disabled', () => {
+  test('renders uncolored stage labels without event metadata when color is disabled', () => {
     const output = render(coloredStageRecords(), 'learn', { color: false })
 
     expect(output).toContain('[USER 用户输入]')
+    expect(output).not.toContain('event=')
     expect(output).not.toContain('\x1b[')
+  })
+
+  test('renders one colored event metadata line for a turn start record', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [
+              { type: 'user', message: { content: 'inspect traces' } },
+            ],
+          },
+        }),
+      ],
+      'learn',
+      { color: true },
+    )
+
+    expect(output).toContain('\x1b[1;36m[TURN 轮次]\x1b[0m')
+    expect(output).toContain('\x1b[36m[USER 用户输入]\x1b[0m')
+    expect(output.match(/event=turn\.start/g)).toHaveLength(1)
+    expect(output).toContain('    \x1b[90mevent=turn.start\x1b[0m')
+    expect(output).not.toContain('\x1b[90m    event=turn.start\x1b[0m')
   })
 
   test('renders Learn as concise agent-loop narration', () => {
@@ -368,9 +394,8 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toBe(
-      '  [SIDE 旁路任务] session_memory collapsed\n    event=turn.start\n',
-    )
+    expect(output).toContain('[SIDE 旁路任务] session_memory collapsed')
+    expect(output).not.toContain('event=')
     expect(output).not.toContain('TURN')
     expect(output).not.toContain('USER')
     expect(output).not.toContain('SIDE MEMORY BODY SHOULD NOT PRINT')
@@ -400,9 +425,10 @@ describe('trace live stream', () => {
       'deep',
     )
 
-    expect(output).toBe(
-      '  [SIDE 旁路任务] session_memory messages=2 tools=2\n    event=turn.start\n',
+    expect(output).toContain(
+      '[SIDE 旁路任务] session_memory messages=2 tools=2',
     )
+    expect(output).not.toContain('event=')
     expect(output).not.toContain('TURN')
     expect(output).not.toContain('USER')
     expect(output).not.toContain('SIDE MEMORY BODY SHOULD NOT PRINT')

@@ -122,21 +122,35 @@ function renderRecord(
   state: TraceLiveState,
   depth: TraceLiveDepth,
 ): string[] {
+  const lines = renderRecordLines(record, state, depth)
+
+  if (state.color && lines.length > 0) {
+    lines.push(eventMetadataLine(record.type))
+  }
+
+  return lines
+}
+
+function renderRecordLines(
+  record: TraceDisplayRecord,
+  state: TraceLiveState,
+  depth: TraceLiveDepth,
+): string[] {
   const payload = getPayload(record)
 
   switch (record.type) {
     case 'turn.start':
-      return renderTurnStart(payload, state, depth, record.type)
+      return renderTurnStart(payload, state, depth)
     case 'api.request_built':
-      return renderRequestBuilt(payload, state, depth, record.type)
+      return renderRequestBuilt(payload, state, depth)
     case 'api.stream_event':
-      return renderStreamEvent(payload, state, depth, record.type)
+      return renderStreamEvent(payload, state, depth)
     case 'tool.detected':
-      return renderToolDetected(payload, state, depth, record.type)
+      return renderToolDetected(payload, state, depth)
     case 'tool.permission_result':
-      return renderPermission(payload, depth, record.type, state.color)
+      return renderPermission(payload, depth, state.color)
     case 'tool.started':
-      return renderToolStarted(payload, record.type, state.color)
+      return renderToolStarted(payload, state.color)
     case 'tool.result':
     case 'tool.error':
     case 'tool.cancelled':
@@ -145,19 +159,18 @@ function renderRecord(
     case 'hook.result':
       return renderHook(record.type, payload, depth, state.color)
     case 'transcript.appended':
-      return renderTranscriptAppend(payload, state, depth, record.type)
+      return renderTranscriptAppend(payload, state, depth)
     case 'query.loop_end':
-      return renderLoopEnd(payload, state, depth, record.type)
+      return renderLoopEnd(payload, state, depth)
     case 'turn.end':
-      return renderTurnEnd(payload, depth, record.type, state.color)
+      return renderTurnEnd(payload, depth, state.color)
     case 'api.retry':
-      return renderRetry(payload, record.type, state.color)
+      return renderRetry(payload, state.color)
     case 'api.error':
     case 'trace.read_error':
       return stageLine(
         'ERROR',
         `${record.type} ${compactText(getString(payload, 'message')) ?? 'collapsed'}`,
-        record.type,
         state.color,
       )
     default:
@@ -165,20 +178,14 @@ function renderRecord(
   }
 }
 
-function stageLine(
-  stage: StreamStage,
-  text: string,
-  eventType: string,
-  color: boolean,
-): string[] {
-  const metadata = color
-    ? colorize(`  event=${eventType}`, '90', color)
-    : `event=${eventType}`
-
+function stageLine(stage: StreamStage, text: string, color: boolean): string[] {
   return [
     `  ${colorize(`[${STAGE_LABELS[stage]}]`, STAGE_COLORS[stage], color)} ${text}\n`,
-    `    ${metadata}\n`,
   ]
+}
+
+function eventMetadataLine(eventType: string): string {
+  return `    ${colorize(`event=${eventType}`, '90', true)}\n`
 }
 
 function colorize(text: string, code: string, enabled: boolean): string {
@@ -189,18 +196,11 @@ function renderTurnStart(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  eventType: string,
 ): string[] {
   const querySource = getString(payload, 'querySource')
 
   if (!isMainQuerySource(querySource)) {
-    return renderSideTurnStart(
-      payload,
-      querySource,
-      depth,
-      eventType,
-      state.color,
-    )
+    return renderSideTurnStart(payload, querySource, depth, state.color)
   }
 
   state.turnNumber += 1
@@ -215,12 +215,11 @@ function renderTurnStart(
   const lines = stageLine(
     'TURN',
     `${state.turnNumber} - ${userText}`,
-    eventType,
     state.color,
   )
 
   if (depth === 'learn') {
-    lines.push(...stageLine('USER', userText, eventType, state.color))
+    lines.push(...stageLine('USER', userText, state.color))
     return lines
   }
 
@@ -228,13 +227,10 @@ function renderTurnStart(
     ...stageLine(
       'USER',
       `INPUT source=${source} text=${userText}`,
-      eventType,
       state.color,
     ),
   )
-  lines.push(
-    ...stageLine('PREP', formatHarnessContext(payload), eventType, state.color),
-  )
+  lines.push(...stageLine('PREP', formatHarnessContext(payload), state.color))
 
   return lines
 }
@@ -243,13 +239,12 @@ function renderSideTurnStart(
   payload: Record<string, unknown>,
   querySource: string | undefined,
   depth: TraceLiveDepth,
-  eventType: string,
   color: boolean,
 ): string[] {
   const source = querySource ?? 'side'
 
   if (depth === 'learn') {
-    return stageLine('SIDE', `${source} collapsed`, eventType, color)
+    return stageLine('SIDE', `${source} collapsed`, color)
   }
 
   const parts = [source]
@@ -268,14 +263,13 @@ function renderSideTurnStart(
     parts.push('collapsed')
   }
 
-  return stageLine('SIDE', parts.join(' '), eventType, color)
+  return stageLine('SIDE', parts.join(' '), color)
 }
 
 function renderRequestBuilt(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  eventType: string,
 ): string[] {
   const querySource = getString(payload, 'querySource')
   const model = getString(payload, 'model') ?? 'unknown-model'
@@ -286,13 +280,12 @@ function renderRequestBuilt(
     const source = querySource ?? 'side'
 
     if (depth === 'learn') {
-      return stageLine('SIDE', `${source} collapsed`, eventType, state.color)
+      return stageLine('SIDE', `${source} collapsed`, state.color)
     }
 
     return stageLine(
       'SIDE',
       `${source} model=${model} messages=${messageCount ?? 0} tools=${toolCount ?? 0}`,
-      eventType,
       state.color,
     )
   }
@@ -300,12 +293,10 @@ function renderRequestBuilt(
   state.requestNumber += 1
   state.currentRequestNumber = state.requestNumber
 
-  const lines = renderPreparedMessages(payload, state, depth, eventType)
+  const lines = renderPreparedMessages(payload, state, depth)
 
   if (depth === 'learn') {
-    lines.push(
-      ...stageLine('LLM', `request sent ${model}`, eventType, state.color),
-    )
+    lines.push(...stageLine('LLM', `request sent ${model}`, state.color))
     return lines
   }
 
@@ -336,9 +327,7 @@ function renderRequestBuilt(
     requestParts.push(`effort=${effort}`)
   }
 
-  lines.push(
-    ...stageLine('LLM', requestParts.join(' '), eventType, state.color),
-  )
+  lines.push(...stageLine('LLM', requestParts.join(' '), state.color))
   return lines
 }
 
@@ -346,7 +335,6 @@ function renderPreparedMessages(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  eventType: string,
 ): string[] {
   const counts = state.pendingMessageCounts
   if (counts === undefined) {
@@ -360,7 +348,6 @@ function renderPreparedMessages(
     return stageLine(
       'PREP',
       `messages[] prepared user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}`,
-      eventType,
       state.color,
     )
   }
@@ -368,7 +355,6 @@ function renderPreparedMessages(
   return stageLine(
     'PREP',
     `HARNESS messages user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}`,
-    eventType,
     state.color,
   )
 }
@@ -377,7 +363,6 @@ function renderStreamEvent(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  traceEventType: string,
 ): string[] {
   const eventType = getString(payload, 'eventType') ?? 'stream_event'
 
@@ -390,24 +375,22 @@ function renderStreamEvent(
     return stageLine(
       'STREAM',
       `#${state.currentRequestNumber} content_block_delta ${deltaType}`,
-      traceEventType,
       state.color,
     )
   }
 
   if (eventType === 'message_start') {
     return depth === 'learn'
-      ? stageLine('STREAM', 'stream started', traceEventType, state.color)
+      ? stageLine('STREAM', 'stream started', state.color)
       : stageLine(
           'STREAM',
           `#${state.currentRequestNumber} message_start`,
-          traceEventType,
           state.color,
         )
   }
 
   if (eventType === 'content_block_start') {
-    return renderContentBlockStart(payload, state, depth, traceEventType)
+    return renderContentBlockStart(payload, state, depth)
   }
 
   if (eventType === 'message_delta') {
@@ -421,7 +404,6 @@ function renderStreamEvent(
     return stageLine(
       'STREAM',
       `#${state.currentRequestNumber} message_delta${suffix}`,
-      traceEventType,
       state.color,
     )
   }
@@ -431,7 +413,6 @@ function renderStreamEvent(
     : stageLine(
         'STREAM',
         `#${state.currentRequestNumber} ${eventType}`,
-        traceEventType,
         state.color,
       )
 }
@@ -440,7 +421,6 @@ function renderContentBlockStart(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  eventType: string,
 ): string[] {
   const blockType = getString(payload, 'contentBlockType') ?? 'block'
   const blockName =
@@ -455,16 +435,10 @@ function renderContentBlockStart(
     const toolName = blockName ?? 'unknown'
 
     return depth === 'learn'
-      ? stageLine(
-          'STREAM',
-          `tool_use requested ${toolName}`,
-          eventType,
-          state.color,
-        )
+      ? stageLine('STREAM', `tool_use requested ${toolName}`, state.color)
       : stageLine(
           'STREAM',
           `#${state.currentRequestNumber} content_block_start tool_use ${toolName}`,
-          eventType,
           state.color,
         )
   }
@@ -477,7 +451,6 @@ function renderContentBlockStart(
   return stageLine(
     'STREAM',
     `#${state.currentRequestNumber} content_block_start ${blockType}${suffix}`,
-    eventType,
     state.color,
   )
 }
@@ -486,7 +459,6 @@ function renderToolDetected(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  eventType: string,
 ): string[] {
   const toolUseId = getString(payload, 'toolUseId')
 
@@ -501,24 +473,13 @@ function renderToolDetected(
   const toolName = getToolName(payload)
 
   return depth === 'learn'
-    ? stageLine(
-        'STREAM',
-        `tool_use requested ${toolName}`,
-        eventType,
-        state.color,
-      )
-    : stageLine(
-        'STREAM',
-        `tool_use detected ${toolName}`,
-        eventType,
-        state.color,
-      )
+    ? stageLine('STREAM', `tool_use requested ${toolName}`, state.color)
+    : stageLine('STREAM', `tool_use detected ${toolName}`, state.color)
 }
 
 function renderPermission(
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
-  eventType: string,
   color: boolean,
 ): string[] {
   if (depth === 'learn') {
@@ -539,12 +500,11 @@ function renderPermission(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return stageLine('TOOL', parts.join(' '), eventType, color)
+  return stageLine('TOOL', parts.join(' '), color)
 }
 
 function renderToolStarted(
   payload: Record<string, unknown>,
-  eventType: string,
   color: boolean,
 ): string[] {
   const toolName = getToolName(payload)
@@ -555,7 +515,7 @@ function renderToolStarted(
     parts.push(`path=${path}`)
   }
 
-  return stageLine('TOOL', parts.join(' '), eventType, color)
+  return stageLine('TOOL', parts.join(' '), color)
 }
 
 function renderToolDone(
@@ -585,7 +545,7 @@ function renderToolDone(
     parts.push(`size=${sizeBytes}B`)
   }
 
-  return stageLine('TOOL', parts.join(' '), eventType, color)
+  return stageLine('TOOL', parts.join(' '), color)
 }
 
 function renderHook(
@@ -601,7 +561,7 @@ function renderHook(
 
   if (eventType === 'hook.started') {
     return depth === 'deep'
-      ? stageLine('HOOK', `${hookEvent} started`, eventType, color)
+      ? stageLine('HOOK', `${hookEvent} started`, color)
       : []
   }
 
@@ -618,14 +578,13 @@ function renderHook(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return stageLine('HOOK', parts.join(' '), eventType, color)
+  return stageLine('HOOK', parts.join(' '), color)
 }
 
 function renderTranscriptAppend(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  eventType: string,
 ): string[] {
   const entryType = getString(payload, 'entryType') ?? 'entry'
 
@@ -642,7 +601,6 @@ function renderTranscriptAppend(
     return stageLine(
       'DECISION',
       'tool_result appended, loop back to LLM',
-      eventType,
       state.color,
     )
   }
@@ -653,7 +611,6 @@ function renderTranscriptAppend(
   return stageLine(
     'STORE',
     `HARNESS transcript appended ${entryType}${suffix}`,
-    eventType,
     state.color,
   )
 }
@@ -662,7 +619,6 @@ function renderLoopEnd(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
-  eventType: string,
 ): string[] {
   const stopReason = getString(payload, 'stopReason') ?? 'loop_end'
 
@@ -676,13 +632,12 @@ function renderLoopEnd(
       return stageLine(
         'DECISION',
         'tool_result appended, loop back to LLM',
-        eventType,
         state.color,
       )
     }
 
     state.learnLoopBackRenderedBeforeLoopEnd = false
-    return stageLine('DECISION', `LOOP ${stopReason}`, eventType, state.color)
+    return stageLine('DECISION', `LOOP ${stopReason}`, state.color)
   }
 
   const loopIndex = getNumber(payload, 'loopIndex') ?? 0
@@ -703,12 +658,11 @@ function renderLoopEnd(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return stageLine('DECISION', parts.join(' '), eventType, state.color)
+  return stageLine('DECISION', parts.join(' '), state.color)
 }
 
 function renderRetry(
   payload: Record<string, unknown>,
-  eventType: string,
   color: boolean,
 ): string[] {
   const retryType = getString(payload, 'retryType') ?? 'api retry'
@@ -737,7 +691,6 @@ function renderRetry(
   return stageLine(
     'LLM',
     parts.length === 1 ? 'RETRY api retry collapsed' : parts.join(' '),
-    eventType,
     color,
   )
 }
@@ -745,7 +698,6 @@ function renderRetry(
 function renderTurnEnd(
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
-  eventType: string,
   color: boolean,
 ): string[] {
   const resultReason = getTurnEndResultReason(payload)
@@ -757,7 +709,7 @@ function renderTurnEnd(
         ? ''
         : ` duration=${formatHumanDurationMs(durationMs)}`
 
-    return stageLine('DONE', `${resultReason}${duration}`, eventType, color)
+    return stageLine('DONE', `${resultReason}${duration}`, color)
   }
 
   const parts = [resultReason]
@@ -771,7 +723,7 @@ function renderTurnEnd(
     parts.push(`finalMessages=${finalMessageCount}`)
   }
 
-  return stageLine('DONE', parts.join(' '), eventType, color)
+  return stageLine('DONE', parts.join(' '), color)
 }
 
 function getTurnEndResultReason(payload: Record<string, unknown>): string {
