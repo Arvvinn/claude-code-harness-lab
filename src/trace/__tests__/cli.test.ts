@@ -447,6 +447,178 @@ describe('trace CLI', () => {
     expect(raw.stdout).not.toContain('latest turn should orient')
   })
 
+  test('tail orientation slices from the latest main turn and keeps only later side turns', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-old-main-turn',
+        sequence: 1,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'old main should not orient' },
+            },
+          ],
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-old-side-turn',
+        sequence: 2,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'old_side_after_old_main',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'old side should not orient' },
+            },
+          ],
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-latest-main-turn',
+        sequence: 3,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'latest main should orient with side' },
+            },
+          ],
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-latest-side-turn',
+        sequence: 4,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'latest_side_after_latest_main',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'latest side may orient' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const tailPromise = runTrace(['tail', 'session-1'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 500,
+    })
+    await delay(50)
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-new-tool-after-orientation',
+        sequence: 5,
+        type: 'tool.started',
+        source: 'tool',
+        payload: {
+          toolName: 'Read',
+          toolUseId: 'toolu_after_orientation',
+          toolInput: { file_path: 'fresh.md' },
+        },
+      }),
+    )
+
+    const result = await tailPromise
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('latest main should orient with side')
+    expect(result.stdout).toContain('latest_side_after_latest_main collapsed')
+    expect(result.stdout).toContain('Read started')
+    expect(result.stdout).not.toContain('old main should not orient')
+    expect(result.stdout).not.toContain('old_side_after_old_main')
+    expect(result.stdout).not.toContain('old side should not orient')
+  })
+
+  test('tail orientation uses the captured EOF snapshot and streams post-offset events once', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-snapshot-main-turn',
+        sequence: 1,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'snapshot latest turn should orient' },
+            },
+          ],
+        },
+      }),
+    )
+
+    let appendedAfterOffset = false
+    const result = await runTrace(
+      ['tail', 'session-1'],
+      {
+        follow: true,
+        pollIntervalMs: 10,
+        idleTimeoutMs: 200,
+      },
+      {
+        onStdoutWrite(chunk) {
+          if (appendedAfterOffset || !chunk.includes('Trace Live - Learn')) {
+            return
+          }
+
+          appendedAfterOffset = true
+          appendTraceEvent(
+            makeTraceEvent({
+              eventId: 'event-post-offset-main-turn',
+              sequence: 2,
+              type: 'turn.start',
+              source: 'query',
+              payload: {
+                querySource: 'repl_main_thread',
+                messages: [
+                  {
+                    type: 'user',
+                    message: {
+                      content: 'post-offset turn must stream once only',
+                    },
+                  },
+                ],
+              },
+            }),
+          )
+        },
+      },
+    )
+
+    expect(appendedAfterOffset).toBe(true)
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('snapshot latest turn should orient')
+    expect(
+      countMatchingLines(
+        result.stdout,
+        '[TURN',
+        'post-offset turn must stream once only',
+      ),
+    ).toBe(1)
+  })
+
   test('tail --deep streams Deep events', async () => {
     saveTraceConfig({ mode: 'full', autoTailWindow: true })
     appendTraceEvent(
@@ -762,6 +934,9 @@ async function runTrace(
     idleTimeoutMs?: number
     startAtEnd?: boolean
   } = { follow: false, startAtEnd: false },
+  hooks: {
+    onStdoutWrite?: (chunk: string) => void
+  } = {},
 ): Promise<{
   exitCode: number
   stdout: string
@@ -773,7 +948,9 @@ async function runTrace(
   const exitCode = await traceMain(args, {
     stdout: {
       write(chunk) {
-        stdout += String(chunk)
+        const text = String(chunk)
+        stdout += text
+        hooks.onStdoutWrite?.(text)
         return true
       },
     },
@@ -791,6 +968,17 @@ async function runTrace(
     stdout,
     stderr,
   }
+}
+
+function countMatchingLines(
+  text: string,
+  firstNeedle: string,
+  secondNeedle: string,
+): number {
+  return text
+    .split(/\r?\n/)
+    .filter(line => line.includes(firstNeedle) && line.includes(secondNeedle))
+    .length
 }
 
 function makeTraceEvent(overrides: Partial<TraceEvent> = {}): TraceEvent {

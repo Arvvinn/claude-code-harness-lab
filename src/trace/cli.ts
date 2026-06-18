@@ -442,7 +442,7 @@ async function writeTail(
 
   if (!raw && follow && startAtEnd) {
     for (const record of getLatestMainTurnRecords(
-      readTraceRecords(target.sessionId),
+      readTailOrientationRecords(target.sessionId, target.eventsPath, offset),
     )) {
       for (const rendered of stream.renderRecord(record)) {
         writeText(io.stdout, rendered)
@@ -598,6 +598,24 @@ function readFileBytes(
   } finally {
     closeSync(fd)
   }
+}
+
+function readTailOrientationRecords(
+  sessionId: string,
+  eventsPath: string,
+  offset: number,
+): TraceDisplayRecord[] {
+  if (offset <= 0) {
+    return []
+  }
+
+  const snapshot = readFileChunk(eventsPath, 0, offset)
+
+  if (snapshot.bytesRead === 0) {
+    return []
+  }
+
+  return readTraceRecordsFromText(sessionId, snapshot.text)
 }
 
 function readTailContinuityMarker(
