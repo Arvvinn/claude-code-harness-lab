@@ -168,7 +168,7 @@ function renderRecordLines(
     case 'query.loop_end':
       return renderLoopEnd(payload, state, depth)
     case 'turn.end':
-      return renderTurnEnd(payload, depth, state.color)
+      return renderTurnEnd(payload, state, depth)
     case 'api.retry':
       return renderRetry(payload, state.color)
     case 'api.error':
@@ -729,8 +729,8 @@ function renderRetry(
 
 function renderTurnEnd(
   payload: Record<string, unknown>,
+  state: TraceLiveState,
   depth: TraceLiveDepth,
-  color: boolean,
 ): string[] {
   const resultReason = getTurnEndResultReason(payload)
   const durationMs = getNumber(payload, 'durationMs')
@@ -741,7 +741,10 @@ function renderTurnEnd(
         ? ''
         : ` duration=${formatHumanDurationMs(durationMs)}`
 
-    return stageLine('DONE', `${resultReason}${duration}`, color)
+    const lines = stageLine('DONE', `${resultReason}${duration}`, state.color)
+
+    state.learnTranscriptStoreEntryTypesSeen.clear()
+    return lines
   }
 
   const parts = [resultReason]
@@ -755,7 +758,7 @@ function renderTurnEnd(
     parts.push(`finalMessages=${finalMessageCount}`)
   }
 
-  return stageLine('DONE', parts.join(' '), color)
+  return stageLine('DONE', parts.join(' '), state.color)
 }
 
 function getTurnEndResultReason(payload: Record<string, unknown>): string {

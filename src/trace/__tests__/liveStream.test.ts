@@ -562,6 +562,53 @@ describe('trace live stream', () => {
     expect(output).not.toContain('SECOND USER BODY SHOULD NOT PRINT')
   })
 
+  test('does not coalesce next user transcript append before the next turn start', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [{ type: 'user', message: { content: 'first turn' } }],
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: { entryType: 'user', byteCount: 111 },
+        }),
+        event({
+          type: 'turn.end',
+          source: 'query',
+          payload: {
+            resultReason: 'completed',
+            durationMs: 10,
+            finalMessageCount: 2,
+          },
+        }),
+        event({
+          type: 'transcript.appended',
+          source: 'transcript',
+          payload: { entryType: 'user', byteCount: 222 },
+        }),
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [{ type: 'user', message: { content: 'second turn' } }],
+          },
+        }),
+      ],
+      'learn',
+    )
+
+    expect(output.match(/transcript appended entry=user/g)).toHaveLength(2)
+    expect(output).toContain('transcript appended entry=user bytes=111')
+    expect(output).toContain('transcript appended entry=user bytes=222')
+  })
+
   test('resets Learn transcript append coalescing on the next main turn', () => {
     const output = render(
       [
