@@ -345,6 +345,33 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('trace.read_error')
   })
 
+  test('replay --raw --deep keeps raw JSONL output', async () => {
+    saveTraceConfig({ mode: 'full', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'raw and deep stays raw' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(['replay', 'session-1', '--raw', '--deep'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('"type":"turn.start"')
+    expect(result.stdout).toContain('raw and deep stays raw')
+    expect(result.stdout).not.toContain('Trace Replay - Learn')
+    expect(result.stdout).not.toContain('Trace Replay - Deep')
+    expect(result.stdout).not.toContain('[USER')
+  })
+
   test('tail starts at EOF and streams newly appended Learn events', async () => {
     saveTraceConfig({ mode: 'learn', autoTailWindow: true })
     appendTraceEvent(
