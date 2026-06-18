@@ -1,4 +1,11 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -6,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
   readTraceTailChunkForTesting,
   readTraceTailContinuityMarkerForTesting,
+  readTraceTailOrientationRecordsForTesting,
   traceMain,
 } from '../cli.js'
 import { loadTraceConfig, saveTraceConfig } from '../config.js'
@@ -951,6 +959,95 @@ describe('trace CLI', () => {
     expect(
       readTraceTailContinuityMarkerForTesting(path, 3)?.bytes.toString('utf8'),
     ).toBe('abc')
+  })
+
+  test('tail orientation snapshot is bounded and locates the latest main turn in the suffix', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-old-main-outside-window',
+        sequence: 1,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'old outside bounded window' },
+            },
+          ],
+        },
+      }),
+    )
+
+    for (let index = 0; index < 80; index += 1) {
+      appendTraceEvent(
+        makeTraceEvent({
+          eventId: `event-padding-${index}`,
+          sequence: index + 2,
+          type: 'tool.result',
+          source: 'tool',
+          payload: {
+            toolName: 'Read',
+            status: 'ok',
+            toolResultSizeBytes: 10,
+            padding: 'x'.repeat(180),
+          },
+        }),
+      )
+    }
+
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-latest-main-in-window',
+        sequence: 100,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'latest inside bounded window' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const eventsPath = getTraceEventsPath('session-1')
+    const fileSize = (await stat(eventsPath)).size
+    const snapshot = readTraceTailOrientationRecordsForTesting(
+      'session-1',
+      eventsPath,
+      fileSize,
+      4096,
+    )
+
+    expect(fileSize).toBeGreaterThan(4096)
+    expect(snapshot.bytesRead).toBeLessThan(fileSize)
+    expect(snapshot.bytesRead).toBeLessThanOrEqual(4096)
+    expect(
+      snapshot.records.some(
+        record => record.eventId === 'event-latest-main-in-window',
+      ),
+    ).toBe(true)
+    expect(
+      snapshot.records.some(
+        record => record.eventId === 'event-old-main-outside-window',
+      ),
+    ).toBe(false)
+
+    const result = await runTrace(['tail', 'session-1'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 50,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('latest inside bounded window')
+    expect(result.stdout).not.toContain('old outside bounded window')
   })
 
   test('inspect prints a JSON summary with counts by type and source', async () => {

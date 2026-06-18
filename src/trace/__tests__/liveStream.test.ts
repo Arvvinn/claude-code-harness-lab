@@ -344,6 +344,101 @@ describe('trace live stream', () => {
     expect(output).not.toContain('HOOK COMMAND SHOULD NOT PRINT')
   })
 
+  test('fills sparse turn start details from query loop start without leaking raw bodies', () => {
+    const records = [
+      event({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          inputChars: 0,
+        },
+      }),
+      event({
+        type: 'query.loop_start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          loopIndex: 1,
+          messages: [
+            { type: 'system', content: 'SYSTEM BODY SHOULD NOT PRINT' },
+            {
+              type: 'user',
+              message: {
+                content: [
+                  {
+                    type: 'text',
+                    text: 'explain trace harness loop rendering',
+                  },
+                ],
+              },
+            },
+          ],
+          systemPrompt: [
+            { type: 'text', text: 'PROMPT BODY SHOULD NOT PRINT' },
+          ],
+          userContext: { claudeMd: 'CLAUDE MD SHOULD NOT PRINT' },
+          systemContext: { gitStatus: 'GIT STATUS SHOULD NOT PRINT' },
+          tools: [{ name: 'Read' }, { name: 'Grep' }],
+        },
+      }),
+    ]
+
+    const learn = render(records, 'learn')
+    const deep = render(records, 'deep')
+
+    expect(learn).toContain('[TURN')
+    expect(learn).toContain('1 - input collapsed')
+    expect(learn).toContain('explain trace harness loop rendering')
+    expect(learn).toContain(
+      'messages[] prepared user=1 assistant=0 internal=1 attachments=0 tools=2',
+    )
+    expect(learn).not.toContain('messages[] prepared user=0')
+
+    expect(deep).toContain(
+      'LOOP #1 messages=2 tools=2 querySource=repl_main_thread',
+    )
+    expect(deep).toContain(
+      'HARNESS context systemPrompt=1 block userContext=collapsed systemContext=collapsed',
+    )
+    expect(deep).not.toContain('SYSTEM BODY SHOULD NOT PRINT')
+    expect(deep).not.toContain('PROMPT BODY SHOULD NOT PRINT')
+    expect(deep).not.toContain('CLAUDE MD SHOULD NOT PRINT')
+    expect(deep).not.toContain('GIT STATUS SHOULD NOT PRINT')
+  })
+
+  test('does not duplicate user narration when turn start already has messages', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            messages: [
+              { type: 'user', message: { content: 'already visible user' } },
+            ],
+          },
+        }),
+        event({
+          type: 'query.loop_start',
+          source: 'query',
+          payload: {
+            querySource: 'repl_main_thread',
+            loopIndex: 1,
+            messages: [
+              { type: 'user', message: { content: 'already visible user' } },
+            ],
+            tools: [{ name: 'Read' }],
+          },
+        }),
+      ],
+      'learn',
+    )
+
+    expect(output.match(/\[USER .*already visible user/g)).toHaveLength(1)
+  })
+
   test('summarizes known side requests without raw bodies', () => {
     const cases = [
       {

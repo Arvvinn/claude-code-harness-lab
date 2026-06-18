@@ -70,7 +70,13 @@ interface TailReadBytes {
   bytesRead: number
 }
 
+interface TailOrientationSnapshot {
+  records: TraceDisplayRecord[]
+  bytesRead: number
+}
+
 const TAIL_CONTINUITY_MARKER_BYTES = 64
+const TAIL_ORIENTATION_SNAPSHOT_BYTES = 256 * 1024
 
 const USAGE =
   'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--deep] [--raw]|replay <sessionId> [--deep] [--raw]|inspect <sessionId>'
@@ -452,7 +458,8 @@ async function writeTail(
 
   if (!raw && follow && startAtEnd) {
     for (const record of getLatestMainTurnRecords(
-      readTailOrientationRecords(target.sessionId, target.eventsPath, offset),
+      readTailOrientationRecords(target.sessionId, target.eventsPath, offset)
+        .records,
     )) {
       for (const rendered of stream.renderRecord(record)) {
         writeText(io.stdout, rendered)
@@ -614,18 +621,46 @@ function readTailOrientationRecords(
   sessionId: string,
   eventsPath: string,
   offset: number,
-): TraceDisplayRecord[] {
+  maxBytes = TAIL_ORIENTATION_SNAPSHOT_BYTES,
+): TailOrientationSnapshot {
   if (offset <= 0) {
-    return []
+    return {
+      records: [],
+      bytesRead: 0,
+    }
   }
 
-  const snapshot = readFileChunk(eventsPath, 0, offset)
+  const length = Math.min(offset, maxBytes)
+  const readOffset = offset - length
+  const snapshot = readFileChunk(eventsPath, readOffset, length)
 
   if (snapshot.bytesRead === 0) {
-    return []
+    return {
+      records: [],
+      bytesRead: 0,
+    }
   }
 
-  return readTraceRecordsFromText(sessionId, snapshot.text)
+  return {
+    records: readTraceRecordsFromText(
+      sessionId,
+      readOffset === 0 ? snapshot.text : dropFirstPartialLine(snapshot.text),
+    ),
+    bytesRead: snapshot.bytesRead,
+  }
+}
+
+function dropFirstPartialLine(text: string): string {
+  const newlineIndex = text.search(/\r?\n/)
+
+  if (newlineIndex === -1) {
+    return ''
+  }
+
+  const firstNewlineLength =
+    text[newlineIndex] === '\r' && text[newlineIndex + 1] === '\n' ? 2 : 1
+
+  return text.slice(newlineIndex + firstNewlineLength)
 }
 
 function readTailContinuityMarker(
@@ -688,6 +723,15 @@ export function readTraceTailContinuityMarkerForTesting(
   offset: number,
 ): TailContinuityMarker | null {
   return readTailContinuityMarker(path, offset)
+}
+
+export function readTraceTailOrientationRecordsForTesting(
+  sessionId: string,
+  eventsPath: string,
+  offset: number,
+  maxBytes: number,
+): TailOrientationSnapshot {
+  return readTailOrientationRecords(sessionId, eventsPath, offset, maxBytes)
 }
 
 function writeTailLine(

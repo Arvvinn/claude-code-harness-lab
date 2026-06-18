@@ -82,6 +82,7 @@ interface TraceLiveState {
   learnSideTranscriptStoreEntryTypesSeenStack: Set<string>[]
   learnLoopBackRenderedBeforeLoopEnd: boolean
   color: boolean
+  mainTurnHasReadableUser: boolean
   pendingMessageCounts?: MessageCounts
 }
 
@@ -116,6 +117,7 @@ export function createTraceLiveStream(
     learnSideTranscriptStoreEntryTypesSeenStack: [],
     learnLoopBackRenderedBeforeLoopEnd: false,
     color: options.color ?? false,
+    mainTurnHasReadableUser: false,
   }
 
   return {
@@ -152,6 +154,8 @@ function renderRecordLines(
       return renderTraceSession(record.type, state.color)
     case 'turn.start':
       return renderTurnStart(payload, state, depth)
+    case 'query.loop_start':
+      return renderQueryLoopStart(payload, state, depth)
     case 'api.request_built':
       return renderRequestBuilt(payload, state, depth)
     case 'api.stream_event':
@@ -224,12 +228,16 @@ function renderTurnStart(
   state.learnMainTranscriptStoreEntryTypesSeen.clear()
   state.learnBetweenTranscriptStoreEntryTypesSeen.clear()
   state.learnSideTranscriptStoreEntryTypesSeenStack.length = 0
-  state.pendingMessageCounts = summarizeMessages(payload.messages)
+  state.mainTurnHasReadableUser = false
+  state.pendingMessageCounts = hasMessages(payload.messages)
+    ? summarizeMessages(payload.messages)
+    : undefined
 
-  const userText =
+  const extractedUserText =
     extractLatestUserText(payload.messages) ??
-    compactText(getString(payload, 'prompt')) ??
-    'input collapsed'
+    compactText(getString(payload, 'prompt'))
+  const userText = extractedUserText ?? 'input collapsed'
+  state.mainTurnHasReadableUser = extractedUserText !== undefined
   const source = querySource ?? 'unknown'
   const lines = stageLine(
     'TURN',
@@ -250,6 +258,54 @@ function renderTurnStart(
     ),
   )
   lines.push(...stageLine('PREP', formatHarnessContext(payload), state.color))
+
+  return lines
+}
+
+function renderQueryLoopStart(
+  payload: Record<string, unknown>,
+  state: TraceLiveState,
+  depth: TraceLiveDepth,
+): string[] {
+  const querySource = getString(payload, 'querySource')
+
+  if (!isMainQuerySource(querySource)) {
+    return []
+  }
+
+  const lines: string[] = []
+  const source = querySource ?? 'unknown'
+  const userText =
+    extractLatestUserText(payload.messages) ??
+    compactText(getString(payload, 'prompt'))
+  const messageCounts = hasMessages(payload.messages)
+    ? summarizeMessages(payload.messages)
+    : undefined
+  const toolCount = getCount(payload, 'toolCount', 'tools') ?? 0
+
+  if (!state.mainTurnHasReadableUser && userText !== undefined) {
+    lines.push(
+      ...(depth === 'learn'
+        ? stageLine('USER', userText, state.color)
+        : stageLine(
+            'USER',
+            `INPUT source=${source} text=${userText}`,
+            state.color,
+          )),
+    )
+    state.mainTurnHasReadableUser = true
+  }
+
+  if (messageCounts !== undefined && state.pendingMessageCounts === undefined) {
+    lines.push(
+      ...renderMessagePreparation(messageCounts, toolCount, state, depth),
+    )
+  }
+
+  if (depth === 'deep') {
+    lines.push(...stageLine('PREP', formatHarnessContext(payload), state.color))
+    lines.push(...stageLine('LLM', formatLoopStart(payload), state.color))
+  }
 
   return lines
 }
@@ -368,6 +424,17 @@ function renderPreparedMessages(
   state.pendingMessageCounts = undefined
   const toolCount = getCount(payload, 'toolCount', 'tools') ?? 0
 
+  return renderMessagePreparation(counts, toolCount, state, depth)
+}
+
+function renderMessagePreparation(
+  counts: MessageCounts,
+  toolCount: number,
+  state: TraceLiveState,
+  depth: TraceLiveDepth,
+): string[] {
+  state.pendingMessageCounts = undefined
+
   if (depth === 'learn') {
     return stageLine(
       'PREP',
@@ -381,6 +448,26 @@ function renderPreparedMessages(
     `HARNESS messages user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}`,
     state.color,
   )
+}
+
+function formatLoopStart(payload: Record<string, unknown>): string {
+  const loopIndex = getNumber(payload, 'loopIndex') ?? 0
+  const messageCount = getCount(payload, 'messageCount', 'messages') ?? 0
+  const toolCount = getCount(payload, 'toolCount', 'tools') ?? 0
+  const querySource = getString(payload, 'querySource') ?? 'unknown'
+  const parts = [
+    `LOOP #${loopIndex}`,
+    `messages=${messageCount}`,
+    `tools=${toolCount}`,
+    `querySource=${querySource}`,
+  ]
+  const abortController = getBoolean(payload, 'hasAbortController')
+
+  if (abortController !== undefined) {
+    parts.push(`abortController=${abortController}`)
+  }
+
+  return parts.join(' ')
 }
 
 function renderStreamEvent(
@@ -887,6 +974,10 @@ function summarizeMessages(messages: unknown): MessageCounts {
   }
 
   return counts
+}
+
+function hasMessages(messages: unknown): boolean {
+  return Array.isArray(messages) && messages.length > 0
 }
 
 function extractLatestUserText(messages: unknown): string | undefined {
