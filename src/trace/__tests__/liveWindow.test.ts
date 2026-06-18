@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events'
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
+  TRACE_TAIL_DEEP_COMMAND,
   TRACE_TAIL_COMMAND,
+  getTraceTailCommand,
   launchTraceTailWindow,
   setTraceTailWindowChildProcessSpawnForTesting,
   resetTraceTailWindowForTesting,
@@ -11,6 +13,12 @@ import {
 describe('launchTraceTailWindow', () => {
   afterEach(() => {
     resetTraceTailWindowForTesting()
+  })
+
+  test('selects shallow tail command for learn and off, deep tail command for full', () => {
+    expect(getTraceTailCommand({ mode: 'learn' })).toBe(TRACE_TAIL_COMMAND)
+    expect(getTraceTailCommand({ mode: 'off' })).toBe(TRACE_TAIL_COMMAND)
+    expect(getTraceTailCommand({ mode: 'full' })).toBe(TRACE_TAIL_DEEP_COMMAND)
   })
 
   test('skips launching when auto tail is disabled or tracing is off', async () => {
@@ -73,7 +81,32 @@ describe('launchTraceTailWindow', () => {
     ])
   })
 
-  test('launches at most once per process', async () => {
+  test('launches deep tail command for full mode on Windows', async () => {
+    const calls: Array<{ executable: string; args: string[] }> = []
+    resetTraceTailWindowForTesting()
+    setTraceTailWindowSpawnForTesting(async (executable, args) => {
+      calls.push({ executable, args })
+      return { ok: true }
+    })
+
+    const result = await launchTraceTailWindow({
+      config: { mode: 'full', autoTailWindow: true },
+      platform: 'win32',
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      command: TRACE_TAIL_DEEP_COMMAND,
+      launcher: 'pwsh',
+    })
+    expect(calls[0]?.args).toEqual([
+      '-NoProfile',
+      '-Command',
+      "Start-Process pwsh -ArgumentList '-NoExit','-Command','claude trace tail --deep'",
+    ])
+  })
+
+  test('launches at most once per process for the same command', async () => {
     const calls: Array<{ executable: string; args: string[] }> = []
     resetTraceTailWindowForTesting()
     setTraceTailWindowSpawnForTesting(async (executable, args) => {
@@ -93,10 +126,106 @@ describe('launchTraceTailWindow', () => {
     expect(first.ok).toBe(true)
     expect(second).toMatchObject({
       ok: true,
-      command: TRACE_TAIL_COMMAND,
+      command: TRACE_TAIL_DEEP_COMMAND,
       reason: 'already_launched',
     })
     expect(calls).toHaveLength(1)
+  })
+
+  test('launches a new tail window when the desired command changes', async () => {
+    const calls: Array<{ executable: string; args: string[] }> = []
+    resetTraceTailWindowForTesting()
+    setTraceTailWindowSpawnForTesting(async (executable, args) => {
+      calls.push({ executable, args })
+      return { ok: true }
+    })
+
+    const first = await launchTraceTailWindow({
+      config: { mode: 'learn', autoTailWindow: true },
+      platform: 'win32',
+    })
+    const second = await launchTraceTailWindow({
+      config: { mode: 'full', autoTailWindow: true },
+      platform: 'win32',
+    })
+
+    expect(first).toMatchObject({
+      ok: true,
+      command: TRACE_TAIL_COMMAND,
+    })
+    expect(second).toMatchObject({
+      ok: true,
+      command: TRACE_TAIL_DEEP_COMMAND,
+      launcher: 'pwsh',
+    })
+    expect(calls).toHaveLength(2)
+    expect(calls[1]?.args).toEqual([
+      '-NoProfile',
+      '-Command',
+      "Start-Process pwsh -ArgumentList '-NoExit','-Command','claude trace tail --deep'",
+    ])
+
+    resetTraceTailWindowForTesting()
+    calls.length = 0
+    setTraceTailWindowSpawnForTesting(async (executable, args) => {
+      calls.push({ executable, args })
+      return { ok: true }
+    })
+
+    const deepFirst = await launchTraceTailWindow({
+      config: { mode: 'full', autoTailWindow: true },
+      platform: 'win32',
+    })
+    const shallowSecond = await launchTraceTailWindow({
+      config: { mode: 'learn', autoTailWindow: true },
+      platform: 'win32',
+    })
+
+    expect(deepFirst).toMatchObject({
+      ok: true,
+      command: TRACE_TAIL_DEEP_COMMAND,
+    })
+    expect(shallowSecond).toMatchObject({
+      ok: true,
+      command: TRACE_TAIL_COMMAND,
+      launcher: 'pwsh',
+    })
+    expect(calls).toHaveLength(2)
+    expect(calls[1]?.args).toEqual([
+      '-NoProfile',
+      '-Command',
+      "Start-Process pwsh -ArgumentList '-NoExit','-Command','claude trace tail'",
+    ])
+  })
+
+  test('falls back to later Linux launcher candidates with deep command args', async () => {
+    const calls: Array<{ executable: string; args: string[] }> = []
+    resetTraceTailWindowForTesting()
+    setTraceTailWindowSpawnForTesting(async (executable, args) => {
+      calls.push({ executable, args })
+      return { ok: executable === 'xterm' }
+    })
+
+    const result = await launchTraceTailWindow({
+      config: { mode: 'full', autoTailWindow: true },
+      platform: 'linux',
+    })
+
+    expect(result).toMatchObject({
+      ok: true,
+      command: TRACE_TAIL_DEEP_COMMAND,
+      launcher: 'xterm',
+    })
+    expect(calls).toEqual([
+      {
+        executable: 'gnome-terminal',
+        args: ['--', 'claude', 'trace', 'tail', '--deep'],
+      },
+      {
+        executable: 'xterm',
+        args: ['-e', 'claude', 'trace', 'tail', '--deep'],
+      },
+    ])
   })
 
   test('falls back to the tail command when every launcher fails', async () => {
@@ -144,7 +273,7 @@ describe('launchTraceTailWindow', () => {
       command: TRACE_TAIL_COMMAND,
       reason: 'launch_failed',
     })
-    expect(calls).toHaveLength(6)
+    expect(calls).toHaveLength(4)
   })
 
   test('treats launchers that spawn then exit nonzero as failed launches', async () => {
@@ -180,7 +309,7 @@ describe('launchTraceTailWindow', () => {
       command: TRACE_TAIL_COMMAND,
       reason: 'launch_failed',
     })
-    expect(children).toHaveLength(6)
+    expect(children).toHaveLength(4)
   })
 
   test('clears launch timeouts when spawned launchers exit nonzero quickly', async () => {
@@ -208,8 +337,8 @@ describe('launchTraceTailWindow', () => {
       command: TRACE_TAIL_COMMAND,
       reason: 'launch_failed',
     })
-    expect(children).toHaveLength(3)
-    expect(children.map(child => child.unrefCalls)).toEqual([0, 0, 0])
+    expect(children).toHaveLength(2)
+    expect(children.map(child => child.unrefCalls)).toEqual([0, 0])
   })
 })
 

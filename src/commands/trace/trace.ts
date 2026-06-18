@@ -10,6 +10,7 @@ import {
 } from '../../trace/bus.js'
 import { loadTraceConfig, saveTraceConfig } from '../../trace/config.js'
 import {
+  getTraceTailCommand,
   launchTraceTailWindow,
   TRACE_TAIL_COMMAND,
   type TraceTailWindowLaunchResult,
@@ -28,7 +29,12 @@ export const call: LocalCommandCall = async args => {
     case 'tail':
       return {
         type: 'display',
-        value: `Trace tail command:\n${TRACE_TAIL_COMMAND}`,
+        value: [
+          'Trace tail command:',
+          TRACE_TAIL_COMMAND,
+          'Deep tail command:',
+          getTraceTailCommand({ mode: 'full' }),
+        ].join('\n'),
       }
     case 'off':
       endTraceSession({ reason: 'trace command disabled tracing' })
@@ -84,12 +90,13 @@ function startCurrentTraceSessionIfNeeded(): void {
 
 function formatTraceStatus(): string {
   const mode = getTraceMode()
+  const tailCommand = getTraceTailCommand({ mode })
   const lines = [`Mode: ${mode}`]
 
   if (mode === 'off') {
     lines.push('Session: none')
     lines.push('Events: none')
-    lines.push(`Tail: ${TRACE_TAIL_COMMAND}`)
+    lines.push(`Tail: ${tailCommand}`)
 
     return lines.join('\n')
   }
@@ -105,7 +112,7 @@ function formatTraceStatus(): string {
     lines.push('Events: none')
   }
 
-  lines.push(`Tail: ${TRACE_TAIL_COMMAND}`)
+  lines.push(`Tail: ${tailCommand}`)
 
   return lines.join('\n')
 }

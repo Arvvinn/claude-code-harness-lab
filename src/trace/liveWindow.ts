@@ -3,6 +3,7 @@ import { loadTraceConfig } from './config.js'
 import type { TraceConfig } from './types.js'
 
 export const TRACE_TAIL_COMMAND = 'claude trace tail'
+export const TRACE_TAIL_DEEP_COMMAND = 'claude trace tail --deep'
 
 export type TraceTailWindowLaunchReason =
   | 'disabled'
@@ -51,6 +52,7 @@ interface LauncherCandidate {
 }
 
 let launchSucceeded = false
+let launchedCommand: string | null = null
 let spawnForTesting: TraceTailWindowSpawn | null = null
 let childProcessSpawnForTesting: TraceTailWindowChildProcessSpawn | null = null
 
@@ -58,11 +60,12 @@ export async function launchTraceTailWindow(
   options: LaunchTraceTailWindowOptions = {},
 ): Promise<TraceTailWindowLaunchResult> {
   const config = options.config ?? loadTraceConfig()
+  const command = getTraceTailCommand(config)
 
   if (!config.autoTailWindow) {
     return {
       ok: false,
-      command: TRACE_TAIL_COMMAND,
+      command,
       reason: 'disabled',
     }
   }
@@ -70,25 +73,28 @@ export async function launchTraceTailWindow(
   if (config.mode === 'off') {
     return {
       ok: false,
-      command: TRACE_TAIL_COMMAND,
+      command,
       reason: 'off',
     }
   }
 
-  if (launchSucceeded) {
+  if (launchSucceeded && launchedCommand === command) {
     return {
       ok: true,
-      command: TRACE_TAIL_COMMAND,
+      command,
       reason: 'already_launched',
     }
   }
 
-  const candidates = getLauncherCandidates(options.platform ?? process.platform)
+  const candidates = getLauncherCandidates(
+    options.platform ?? process.platform,
+    command,
+  )
 
   if (candidates.length === 0) {
     return {
       ok: false,
-      command: TRACE_TAIL_COMMAND,
+      command,
       reason: 'unsupported_platform',
     }
   }
@@ -101,9 +107,10 @@ export async function launchTraceTailWindow(
 
     if (result.ok) {
       launchSucceeded = true
+      launchedCommand = command
       return {
         ok: true,
-        command: TRACE_TAIL_COMMAND,
+        command,
         launcher: candidate.executable,
       }
     }
@@ -113,10 +120,14 @@ export async function launchTraceTailWindow(
 
   return {
     ok: false,
-    command: TRACE_TAIL_COMMAND,
+    command,
     reason: 'launch_failed',
     error: formatError(lastError),
   }
+}
+
+export function getTraceTailCommand(config: Pick<TraceConfig, 'mode'>): string {
+  return config.mode === 'full' ? TRACE_TAIL_DEEP_COMMAND : TRACE_TAIL_COMMAND
 }
 
 export function setTraceTailWindowSpawnForTesting(
@@ -133,12 +144,14 @@ export function setTraceTailWindowChildProcessSpawnForTesting(
 
 export function resetTraceTailWindowForTesting(): void {
   launchSucceeded = false
+  launchedCommand = null
   spawnForTesting = null
   childProcessSpawnForTesting = null
 }
 
 function getLauncherCandidates(
   platform: typeof process.platform,
+  command: string,
 ): LauncherCandidate[] {
   switch (platform) {
     case 'win32':
@@ -148,7 +161,7 @@ function getLauncherCandidates(
           args: [
             '-NoProfile',
             '-Command',
-            "Start-Process pwsh -ArgumentList '-NoExit','-Command','claude trace tail'",
+            `Start-Process pwsh -ArgumentList '-NoExit','-Command','${command}'`,
           ],
         },
         {
@@ -156,7 +169,7 @@ function getLauncherCandidates(
           args: [
             '-NoProfile',
             '-Command',
-            "Start-Process powershell -ArgumentList '-NoExit','-Command','claude trace tail'",
+            `Start-Process powershell -ArgumentList '-NoExit','-Command','${command}'`,
           ],
         },
       ]
@@ -164,27 +177,26 @@ function getLauncherCandidates(
       return [
         {
           executable: 'osascript',
-          args: [
-            '-e',
-            'tell application "Terminal" to do script "claude trace tail"',
-          ],
+          args: ['-e', `tell application "Terminal" to do script "${command}"`],
         },
       ]
-    case 'linux':
+    case 'linux': {
+      const commandArgs =
+        command === TRACE_TAIL_DEEP_COMMAND
+          ? ['claude', 'trace', 'tail', '--deep']
+          : ['claude', 'trace', 'tail']
+
       return [
         {
-          executable: 'wt',
-          args: ['claude', 'trace', 'tail'],
-        },
-        {
           executable: 'gnome-terminal',
-          args: ['--', 'claude', 'trace', 'tail'],
+          args: ['--', ...commandArgs],
         },
         {
           executable: 'xterm',
-          args: ['-e', 'claude', 'trace', 'tail'],
+          args: ['-e', ...commandArgs],
         },
       ]
+    }
     default:
       return []
   }

@@ -1,8 +1,13 @@
-import { appendFile, mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { traceMain } from '../cli.js'
+import {
+  readTraceTailChunkForTesting,
+  readTraceTailContinuityMarkerForTesting,
+  traceMain,
+} from '../cli.js'
 import { loadTraceConfig, saveTraceConfig } from '../config.js'
 import { getTraceEventsPath, getTraceRootDir } from '../paths.js'
 import {
@@ -316,7 +321,7 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('trace.read_error')
   })
 
-  test('tail prints a refreshing agent loop panel by default', async () => {
+  test('tail starts at EOF and streams newly appended Learn events', async () => {
     saveTraceConfig({ mode: 'learn', autoTailWindow: true })
     appendTraceEvent(
       makeTraceEvent({
@@ -326,23 +331,93 @@ describe('trace CLI', () => {
           messages: [
             {
               type: 'user',
-              message: { content: 'tail the live agent loop' },
+              message: { content: 'old prompt should not print' },
             },
           ],
         },
       }),
     )
 
-    const result = await runTrace(['tail', 'session-1'])
+    const tailPromise = runTrace(['tail', 'session-1'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 500,
+    })
+    await delay(50)
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-2',
+        sequence: 2,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'new prompt prints' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await tailPromise
 
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain('Agent Loop Live')
-    expect(result.stdout).toContain('[USER]')
-    expect(result.stdout).toContain('tail the live agent loop')
-    expect(result.stdout).toContain(
-      'User -> messages[] -> LLM -> stop_reason/tool_use decision -> tools -> append results -> loop back/return text',
-    )
+    expect(result.stdout).toContain('Trace Live - Learn')
+    expect(result.stdout).toContain('new prompt prints')
+    expect(result.stdout).not.toContain('old prompt should not print')
+    expect(result.stdout).not.toContain('\x1b[2J\x1b[H')
+    expect(result.stdout).not.toContain('Agent Loop Live')
     expect(result.stdout).not.toContain('"type":"turn.start"')
+  })
+
+  test('tail --deep streams Deep events', async () => {
+    saveTraceConfig({ mode: 'full', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'api.request_built',
+        source: 'api',
+        payload: {
+          querySource: 'repl_main_thread',
+          provider: 'firstParty',
+          model: 'old-model-should-not-print',
+          messageCount: 1,
+          toolCount: 1,
+        },
+      }),
+    )
+
+    const tailPromise = runTrace(['tail', 'session-1', '--deep'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 500,
+    })
+    await delay(50)
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-2',
+        sequence: 2,
+        type: 'api.request_built',
+        source: 'api',
+        payload: {
+          querySource: 'repl_main_thread',
+          provider: 'firstParty',
+          model: 'deepseek-v4-pro',
+          messageCount: 2,
+          toolCount: 25,
+        },
+      }),
+    )
+
+    const result = await tailPromise
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Trace Live - Deep')
+    expect(result.stdout).toContain(
+      'REQUEST #1 provider=firstParty model=deepseek-v4-pro',
+    )
+    expect(result.stdout).not.toContain('old-model-should-not-print')
   })
 
   test('tail --raw keeps streaming raw JSONL display', async () => {
@@ -355,29 +430,214 @@ describe('trace CLI', () => {
           messages: [
             {
               type: 'user',
-              message: { content: 'raw tail prompt' },
+              message: { content: 'old raw prompt should not print' },
             },
           ],
         },
       }),
     )
     const manuallyFormattedLine =
-      '  {"eventId":"manual-tail-event","sessionId":"session-1","sequence":2,"timestamp":"2026-06-16T14:03:11.000Z","mode":"learn","source":"api","type":"api.request_built","payload":{"model":"claude-tail-manual"}}  '
+      '  {"eventId":"manual-tail-event","sessionId":"session-1","sequence":3,"timestamp":"2026-06-16T14:03:12.000Z","mode":"learn","source":"api","type":"api.request_built","payload":{"model":"claude-tail-manual"}}  '
     const malformedLine = 'tail raw malformed line stays raw'
+
+    const tailPromise = runTrace(['tail', 'session-1', '--raw'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 500,
+    })
+    await delay(50)
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-2',
+        sequence: 2,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'raw tail prompt' },
+            },
+          ],
+        },
+      }),
+    )
     await appendFile(
       getTraceEventsPath('session-1'),
       `${manuallyFormattedLine}\n${malformedLine}\n`,
     )
 
-    const result = await runTrace(['tail', 'session-1', '--raw'])
+    const result = await tailPromise
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain('"type":"turn.start"')
     expect(result.stdout).toContain('raw tail prompt')
+    expect(result.stdout).not.toContain('old raw prompt should not print')
     expect(result.stdout.split('\n')).toContain(manuallyFormattedLine)
     expect(result.stdout.split('\n')).toContain(malformedLine)
     expect(result.stdout).not.toContain('trace.read_error')
     expect(result.stdout).not.toContain('Agent Loop Live')
+    expect(result.stdout).not.toContain('Trace Live - Learn')
+  })
+
+  test('non-follow tail flushes a final record without trailing newline', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    const eventsPath = getTraceEventsPath('session-1')
+    const line = JSON.stringify(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'unterminated tail prompt' },
+            },
+          ],
+        },
+      }),
+    )
+    await mkdir(dirname(eventsPath), { recursive: true })
+    await writeFile(eventsPath, line)
+
+    const raw = await runTrace(['tail', 'session-1', '--raw'])
+    const semantic = await runTrace(['tail', 'session-1'])
+
+    expect(raw.exitCode).toBe(0)
+    expect(raw.stdout).toBe(`${line}\n`)
+    expect(semantic.exitCode).toBe(0)
+    expect(semantic.stdout).toContain('Trace Live - Learn')
+    expect(semantic.stdout).toContain('unterminated tail prompt')
+  })
+
+  test('follow tail reads rewritten events after truncation', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: {
+                content: `old prompt should not print ${'padding '.repeat(80)}`,
+              },
+            },
+          ],
+        },
+      }),
+    )
+
+    const eventsPath = getTraceEventsPath('session-1')
+    const tailPromise = runTrace(['tail', 'session-1'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 500,
+    })
+    await delay(50)
+    await writeFile(
+      eventsPath,
+      `${JSON.stringify(
+        makeTraceEvent({
+          eventId: 'event-rewritten',
+          sequence: 1,
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            messages: [
+              {
+                type: 'user',
+                message: { content: 'rewritten prompt prints' },
+              },
+            ],
+          },
+        }),
+      )}\n`,
+    )
+
+    const result = await tailPromise
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Trace Live - Learn')
+    expect(result.stdout).toContain('rewritten prompt prints')
+    expect(result.stdout).not.toContain('old prompt should not print')
+  })
+
+  test('follow tail detects rewrite when new file is larger than previous EOF', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'old small prompt should not print' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const eventsPath = getTraceEventsPath('session-1')
+    const tailPromise = runTrace(['tail', 'session-1'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 500,
+    })
+    await delay(50)
+    await writeFile(
+      eventsPath,
+      `${JSON.stringify(
+        makeTraceEvent({
+          eventId: 'event-rewritten-larger',
+          sequence: 1,
+          type: 'turn.start',
+          source: 'query',
+          payload: {
+            messages: [
+              {
+                type: 'user',
+                message: {
+                  content: `rewritten larger prompt prints ${'padding '.repeat(
+                    120,
+                  )}`,
+                },
+              },
+            ],
+          },
+        }),
+      )}\n`,
+    )
+
+    const result = await tailPromise
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Trace Live - Learn')
+    expect(result.stdout).toContain('rewritten larger prompt prints')
+    expect(result.stdout).not.toContain('old small prompt should not print')
+  })
+
+  test('tail chunk reads report actual bytes read', async () => {
+    const path = join(traceDir, 'chunk.txt')
+    await writeFile(path, 'abcdef')
+
+    expect(readTraceTailChunkForTesting(path, 4, 10)).toEqual({
+      text: 'ef',
+      bytesRead: 2,
+    })
+  })
+
+  test('tail continuity marker rejects short reads', async () => {
+    const path = join(traceDir, 'marker.txt')
+    await writeFile(path, 'abc')
+
+    expect(readTraceTailContinuityMarkerForTesting(path, 10)).toBeNull()
+    expect(
+      readTraceTailContinuityMarkerForTesting(path, 3)?.bytes.toString('utf8'),
+    ).toBe('abc')
   })
 
   test('inspect prints a JSON summary with counts by type and source', async () => {
@@ -419,7 +679,12 @@ describe('trace CLI', () => {
 
 async function runTrace(
   args: string[],
-  tail: { follow: boolean } = { follow: false },
+  tail: {
+    follow?: boolean
+    pollIntervalMs?: number
+    idleTimeoutMs?: number
+    startAtEnd?: boolean
+  } = { follow: false, startAtEnd: false },
 ): Promise<{
   exitCode: number
   stdout: string
