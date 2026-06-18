@@ -18,6 +18,7 @@ import {
 import type { TraceEvent } from '../types.js'
 
 const originalTraceDir = process.env.CLAUDE_CODE_TRACE_DIR
+const originalNoColor = process.env.NO_COLOR
 let traceDir: string
 
 describe('trace CLI', () => {
@@ -31,6 +32,12 @@ describe('trace CLI', () => {
       delete process.env.CLAUDE_CODE_TRACE_DIR
     } else {
       process.env.CLAUDE_CODE_TRACE_DIR = originalTraceDir
+    }
+
+    if (originalNoColor === undefined) {
+      delete process.env.NO_COLOR
+    } else {
+      process.env.NO_COLOR = originalNoColor
     }
 
     await rm(traceDir, { recursive: true, force: true })
@@ -183,6 +190,63 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('Agent Loop Replay')
     expect(result.stdout).not.toContain('[SYSTEM]')
     expect(result.stdout).not.toContain('rawRequestParams')
+  })
+
+  test('replay uses colored labels when stdout is a TTY', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'inspect color output' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(
+      ['replay', 'session-1'],
+      { follow: false, startAtEnd: false },
+      { stdoutIsTTY: true },
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('\x1b[36m[USER')
+    expect(result.stdout).toContain('\x1b[0m')
+  })
+
+  test('replay disables colored labels when NO_COLOR is set', async () => {
+    process.env.NO_COLOR = '1'
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'inspect uncolored output' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(
+      ['replay', 'session-1'],
+      { follow: false, startAtEnd: false },
+      { stdoutIsTTY: true },
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('[USER')
+    expect(result.stdout).not.toContain('\x1b[')
   })
 
   test('replay --deep prints deep agent loop stream output', async () => {
@@ -936,6 +1000,7 @@ async function runTrace(
   } = { follow: false, startAtEnd: false },
   hooks: {
     onStdoutWrite?: (chunk: string) => void
+    stdoutIsTTY?: boolean
   } = {},
 ): Promise<{
   exitCode: number
@@ -947,6 +1012,7 @@ async function runTrace(
 
   const exitCode = await traceMain(args, {
     stdout: {
+      isTTY: hooks.stdoutIsTTY,
       write(chunk) {
         const text = String(chunk)
         stdout += text

@@ -26,6 +26,7 @@ import type { TraceMode } from './types.js'
 
 interface WritableOutput {
   write(chunk: string): unknown
+  isTTY?: boolean
 }
 
 export interface TraceTailOptions {
@@ -104,6 +105,7 @@ export async function traceMain(
             requireSessionId(getFirstNonFlagArg(args.slice(1)), 'replay'),
             hasRawFlag(args),
             hasDeepFlag(args),
+            io.stdout,
           ),
         )
         return 0
@@ -328,7 +330,12 @@ function listTraceSessions(): TraceSessionListing[] {
   )
 }
 
-function getReplayText(sessionId: string, raw: boolean, deep: boolean): string {
+function getReplayText(
+  sessionId: string,
+  raw: boolean,
+  deep: boolean,
+  output: WritableOutput,
+): string {
   if (raw) {
     const lines = readNonEmptyLines(getTraceEventsPath(sessionId))
 
@@ -346,7 +353,7 @@ function getReplayText(sessionId: string, raw: boolean, deep: boolean): string {
   }
 
   const depth = deep ? 'deep' : 'learn'
-  const stream = createTraceLiveStream({ depth, color: false })
+  const stream = createTraceLiveStream({ depth, color: shouldUseColor(output) })
   const lines = [
     depth === 'deep' ? 'Trace Replay - Deep' : 'Trace Replay - Learn',
     `Session: ${sessionId}`,
@@ -427,7 +434,10 @@ async function writeTail(
   let pending = ''
   let idleStartedAt = Date.now()
   const depth = deep ? 'deep' : 'learn'
-  const stream = createTraceLiveStream({ depth })
+  const stream = createTraceLiveStream({
+    depth,
+    color: !raw && shouldUseColor(io.stdout),
+  })
 
   if (!raw) {
     writeText(
@@ -741,6 +751,10 @@ function getFirstNonFlagArg(args: string[]): string | undefined {
 
 function writeText(output: WritableOutput, text: string): void {
   output.write(text)
+}
+
+function shouldUseColor(output: WritableOutput): boolean {
+  return output.isTTY === true && process.env.NO_COLOR === undefined
 }
 
 function getErrorMessage(error: unknown): string {
