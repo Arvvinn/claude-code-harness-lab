@@ -105,7 +105,7 @@ describe('trace CLI', () => {
     )
   })
 
-  test('replay prints an agent loop panel by default', async () => {
+  test('replay prints agent loop stream output by default', async () => {
     saveTraceConfig({ mode: 'learn', autoTailWindow: true })
     appendTraceEvent(
       makeTraceEvent({
@@ -176,27 +176,52 @@ describe('trace CLI', () => {
     const result = await runTrace(['replay', 'session-1'])
 
     expect(result.exitCode).toBe(0)
-    expect(result.stdout).toContain('Agent Loop Replay')
-    expect(result.stdout).toContain(
-      'User -> messages[] -> LLM -> stop_reason/tool_use decision -> tools -> append results -> loop back/return text',
-    )
-    expect(result.stdout).toContain('[USER]')
+    expect(result.stdout).toContain('Trace Replay - Learn')
+    expect(result.stdout).toContain('[USER 用户输入]')
+    expect(result.stdout).toContain('[LLM 模型请求]')
     expect(result.stdout).toContain('explain the project')
-    expect(result.stdout).toContain('[SYSTEM]')
-    expect(result.stdout).toContain('systemPrompt: collapsed 1 block')
-    expect(result.stdout).not.toContain('system prompt body')
-    expect(result.stdout).toContain('[LLM]')
-    expect(result.stdout).toContain('claude-test')
+    expect(result.stdout).not.toContain('Agent Loop Replay')
+    expect(result.stdout).not.toContain('[SYSTEM]')
     expect(result.stdout).not.toContain('rawRequestParams')
-    expect(result.stdout).not.toContain(
-      'raw system prompt should stay out of panel',
+  })
+
+  test('replay --deep prints deep agent loop stream output', async () => {
+    saveTraceConfig({ mode: 'full', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'explain the project' },
+            },
+          ],
+        },
+      }),
     )
-    expect(result.stdout).not.toContain(
-      'raw request message should stay out of panel',
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-2',
+        sequence: 2,
+        type: 'api.request_built',
+        source: 'api',
+        payload: {
+          model: 'claude-test',
+          provider: 'firstParty',
+          messageCount: 1,
+          toolCount: 1,
+        },
+      }),
     )
-    expect(result.stdout).toContain('[TOOL]')
-    expect(result.stdout).toContain('Read')
-    expect(result.stdout).not.toContain('14:03:10 turn.start')
+
+    const result = await runTrace(['replay', 'session-1', '--deep'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Trace Replay - Deep')
+    expect(result.stdout).toContain('[PREP 构造上下文]')
+    expect(result.stdout).toContain('messages=')
   })
 
   test('replay collapses noisy internal detail by default while raw preserves it', async () => {
@@ -273,10 +298,9 @@ describe('trace CLI', () => {
     const raw = await runTrace(['replay', 'session-1', '--raw'])
 
     expect(panel.exitCode).toBe(0)
-    expect(panel.stdout).toContain('read README.md')
-    expect(panel.stdout).toContain('attachments/hooks=2 collapsed')
-    expect(panel.stdout).toContain('systemPrompt: collapsed 1 block')
-    expect(panel.stdout).toContain('input=collapsed')
+    expect(panel.stdout).toContain('Trace Replay - Learn')
+    expect(panel.stdout).toContain('[USER 用户输入] read README.md')
+    expect(panel.stdout).toContain('[TOOL 工具] Edit started')
     for (const noisyString of noisyStrings) {
       expect(panel.stdout).not.toContain(noisyString)
     }

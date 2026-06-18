@@ -20,7 +20,6 @@ import {
   renderTraceLiveHeader,
   type TraceLiveStream,
 } from './liveStream.js'
-import { formatTracePanel } from './panel.js'
 import { TRACE_TAIL_COMMAND } from './liveWindow.js'
 import { clearActiveTraceSession, readActiveTraceSession } from './store.js'
 import type { TraceMode } from './types.js'
@@ -73,7 +72,7 @@ interface TailReadBytes {
 const TAIL_CONTINUITY_MARKER_BYTES = 64
 
 const USAGE =
-  'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--deep] [--raw]|replay <sessionId> [--raw]|inspect <sessionId>'
+  'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--deep] [--raw]|replay <sessionId> [--deep] [--raw]|inspect <sessionId>'
 
 export async function traceMain(
   args: string[],
@@ -104,6 +103,7 @@ export async function traceMain(
           getReplayText(
             requireSessionId(getFirstNonFlagArg(args.slice(1)), 'replay'),
             hasRawFlag(args),
+            hasDeepFlag(args),
           ),
         )
         return 0
@@ -292,7 +292,7 @@ function listTraceSessions(): TraceSessionListing[] {
   )
 }
 
-function getReplayText(sessionId: string, raw: boolean): string {
+function getReplayText(sessionId: string, raw: boolean, deep: boolean): string {
   if (raw) {
     const lines = readNonEmptyLines(getTraceEventsPath(sessionId))
 
@@ -309,7 +309,23 @@ function getReplayText(sessionId: string, raw: boolean): string {
     return `No events found for session ${sessionId}\n`
   }
 
-  return formatTracePanel(records, { title: 'Agent Loop Replay' })
+  const depth = deep ? 'deep' : 'learn'
+  const stream = createTraceLiveStream({ depth, color: false })
+  const lines = [
+    depth === 'deep' ? 'Trace Replay - Deep' : 'Trace Replay - Learn',
+    `Session: ${sessionId}`,
+    '',
+  ]
+
+  for (const record of records) {
+    lines.push(
+      ...stream
+        .renderRecord(record)
+        .map(line => (line.endsWith('\n') ? line.slice(0, -1) : line)),
+    )
+  }
+
+  return `${lines.join('\n')}\n`
 }
 
 function getInspectText(sessionId: string): string {
