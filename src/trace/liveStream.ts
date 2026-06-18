@@ -139,6 +139,9 @@ function renderRecordLines(
   const payload = getPayload(record)
 
   switch (record.type) {
+    case 'trace.session_start':
+    case 'trace.session_end':
+      return renderTraceSession(record.type, state.color)
     case 'turn.start':
       return renderTurnStart(payload, state, depth)
     case 'api.request_built':
@@ -159,7 +162,7 @@ function renderRecordLines(
     case 'hook.result':
       return renderHook(record.type, payload, depth, state.color)
     case 'transcript.appended':
-      return renderTranscriptAppend(payload, state, depth)
+      return renderTranscriptAppend(payload, state)
     case 'query.loop_end':
       return renderLoopEnd(payload, state, depth)
     case 'turn.end':
@@ -241,15 +244,20 @@ function renderSideTurnStart(
   depth: TraceLiveDepth,
   color: boolean,
 ): string[] {
-  const source = querySource ?? 'side'
+  const source = formatSideSource(querySource ?? 'side')
 
   if (depth === 'learn') {
     return stageLine('SIDE', `${source} collapsed`, color)
   }
 
   const parts = [source]
+  const model = getString(payload, 'model')
   const messageCount = getCount(payload, 'messageCount', 'messages')
   const toolCount = getCount(payload, 'toolCount', 'tools')
+
+  if (model !== undefined) {
+    parts.push(`model=${model}`)
+  }
 
   if (messageCount !== undefined) {
     parts.push(`messages=${messageCount}`)
@@ -277,7 +285,7 @@ function renderRequestBuilt(
   const toolCount = getCount(payload, 'toolCount', 'tools')
 
   if (!isMainQuerySource(querySource)) {
-    const source = querySource ?? 'side'
+    const source = formatSideSource(querySource ?? 'side')
 
     if (depth === 'learn') {
       return stageLine('SIDE', `${source} collapsed`, state.color)
@@ -584,35 +592,31 @@ function renderHook(
 function renderTranscriptAppend(
   payload: Record<string, unknown>,
   state: TraceLiveState,
-  depth: TraceLiveDepth,
 ): string[] {
   const entryType = getString(payload, 'entryType') ?? 'entry'
 
-  if (depth === 'learn') {
-    if (entryType !== 'tool_result') {
-      return []
-    }
-
-    if (state.learnLoopBackRenderedBeforeLoopEnd) {
-      return []
-    }
-
-    state.learnLoopBackRenderedBeforeLoopEnd = true
-    return stageLine(
-      'DECISION',
-      'tool_result appended, loop back to LLM',
-      state.color,
-    )
+  if (!isTranscriptStoreEntry(entryType)) {
+    return []
   }
 
   const byteCount = getNumber(payload, 'byteCount')
-  const suffix = byteCount === undefined ? '' : ` bytes=${byteCount}`
+  const parts = [`transcript appended entry=${entryType}`]
 
-  return stageLine(
-    'STORE',
-    `HARNESS transcript appended ${entryType}${suffix}`,
-    state.color,
-  )
+  if (byteCount !== undefined) {
+    parts.push(`bytes=${byteCount}`)
+  }
+
+  return stageLine('STORE', parts.join(' '), state.color)
+}
+
+function renderTraceSession(
+  eventType: 'trace.session_start' | 'trace.session_end',
+  color: boolean,
+): string[] {
+  const sessionEvent =
+    eventType === 'trace.session_start' ? 'session_start' : 'session_end'
+
+  return stageLine('STORE', `trace ${sessionEvent}`, color)
 }
 
 function renderLoopEnd(
@@ -854,6 +858,35 @@ function isMainQuerySource(querySource: string | undefined): boolean {
     querySource === 'repl_main_thread' ||
     querySource.startsWith('repl_main_thread:') ||
     querySource === 'sdk'
+  )
+}
+
+function formatSideSource(source: string): string {
+  if (source.includes('memory')) {
+    return source
+  }
+
+  if (source === 'generate_session_title') {
+    return 'generate_session_title'
+  }
+
+  if (source === 'prompt_suggestion') {
+    return 'prompt_suggestion'
+  }
+
+  if (source === 'away_summary') {
+    return 'away_summary'
+  }
+
+  return source
+}
+
+function isTranscriptStoreEntry(entryType: string): boolean {
+  return (
+    entryType === 'user' ||
+    entryType === 'assistant' ||
+    entryType === 'tool_result' ||
+    entryType === 'system'
   )
 }
 

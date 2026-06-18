@@ -344,33 +344,55 @@ describe('trace live stream', () => {
     expect(output).not.toContain('HOOK COMMAND SHOULD NOT PRINT')
   })
 
-  test('collapses side systems in Learn and shows request shape in Deep', () => {
-    const sideEvent = event({
-      type: 'api.request_built',
-      source: 'api',
-      payload: {
-        querySource: 'generate_session_title',
+  test('summarizes known side requests without raw bodies', () => {
+    const cases = [
+      {
+        source: 'generate_session_title',
         model: 'DeepSeek-V4-Flash',
-        messageCount: 1,
-        toolCount: 0,
-        rawRequestParams: {
-          messages: 'SIDE BODY SHOULD NOT PRINT',
-        },
+        messages: 1,
+        tools: 0,
+        body: 'SIDE TITLE BODY SHOULD NOT PRINT',
       },
-    })
+      {
+        source: 'extract_memories',
+        model: 'deepseek-v4-pro',
+        messages: 3,
+        tools: 0,
+        body: 'SIDE EXTRACT BODY SHOULD NOT PRINT',
+      },
+      {
+        source: 'session_memory',
+        model: 'deepseek-v4-pro',
+        messages: 2,
+        tools: 25,
+        body: 'SIDE MEMORY BODY SHOULD NOT PRINT',
+      },
+    ]
 
-    expect(render([sideEvent], 'learn')).toContain(
-      '[SIDE 旁路任务] generate_session_title collapsed',
-    )
-    expect(render([sideEvent], 'learn')).not.toContain(
-      'SIDE BODY SHOULD NOT PRINT',
-    )
-    expect(render([sideEvent], 'deep')).toContain(
-      '[SIDE 旁路任务] generate_session_title model=DeepSeek-V4-Flash messages=1 tools=0',
-    )
-    expect(render([sideEvent], 'deep')).not.toContain(
-      'SIDE BODY SHOULD NOT PRINT',
-    )
+    for (const sideCase of cases) {
+      const sideEvent = event({
+        type: 'api.request_built',
+        source: 'api',
+        payload: {
+          querySource: sideCase.source,
+          model: sideCase.model,
+          messageCount: sideCase.messages,
+          toolCount: sideCase.tools,
+          rawRequestParams: {
+            messages: sideCase.body,
+          },
+        },
+      })
+
+      expect(render([sideEvent], 'learn')).toContain(
+        `[SIDE 旁路任务] ${sideCase.source} collapsed`,
+      )
+      expect(render([sideEvent], 'learn')).not.toContain(sideCase.body)
+      expect(render([sideEvent], 'deep')).toContain(
+        `[SIDE 旁路任务] ${sideCase.source} model=${sideCase.model} messages=${sideCase.messages} tools=${sideCase.tools}`,
+      )
+      expect(render([sideEvent], 'deep')).not.toContain(sideCase.body)
+    }
   })
 
   test('collapses side turn starts in Learn without printing prompt bodies', () => {
@@ -433,6 +455,102 @@ describe('trace live stream', () => {
     expect(output).not.toContain('USER')
     expect(output).not.toContain('SIDE MEMORY BODY SHOULD NOT PRINT')
     expect(output).not.toContain('SIDE PROMPT BODY SHOULD NOT PRINT')
+  })
+
+  test('renders store summaries for transcript persistence without bodies', () => {
+    const records = [
+      event({
+        type: 'transcript.appended',
+        source: 'transcript',
+        payload: {
+          entryType: 'user',
+          byteCount: 512,
+          entry: {
+            message: 'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
+          },
+        },
+      }),
+      event({
+        type: 'transcript.appended',
+        source: 'transcript',
+        payload: {
+          entryType: 'assistant',
+          byteCount: 915,
+          line: 'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
+        },
+      }),
+      event({
+        type: 'transcript.appended',
+        source: 'transcript',
+        payload: {
+          entryType: 'tool_result',
+          byteCount: 628,
+          content: 'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
+        },
+      }),
+      event({
+        type: 'transcript.appended',
+        source: 'transcript',
+        payload: {
+          entryType: 'system',
+          byteCount: 117,
+          text: 'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
+        },
+      }),
+    ]
+
+    for (const depth of ['learn', 'deep'] as const) {
+      const output = render(records, depth)
+
+      expect(output).toContain(
+        '[STORE 记录写入] transcript appended entry=user bytes=512',
+      )
+      expect(output).toContain(
+        '[STORE 记录写入] transcript appended entry=assistant bytes=915',
+      )
+      expect(output).toContain(
+        '[STORE 记录写入] transcript appended entry=tool_result bytes=628',
+      )
+      expect(output).toContain(
+        '[STORE 记录写入] transcript appended entry=system bytes=117',
+      )
+      expect(output).not.toContain(
+        'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
+      )
+    }
+  })
+
+  test('renders store summaries for trace session boundaries', () => {
+    const records = [
+      event({
+        type: 'trace.session_start',
+        source: 'query',
+        payload: {
+          eventsPath: 'C:\\Users\\asuka\\.claude\\projects\\full\\path.jsonl',
+        },
+      }),
+      event({
+        type: 'trace.session_end',
+        source: 'query',
+        payload: {
+          eventsPath: 'C:\\Users\\asuka\\.claude\\projects\\full\\path.jsonl',
+          transcript: 'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
+        },
+      }),
+    ]
+
+    for (const depth of ['learn', 'deep'] as const) {
+      const output = render(records, depth)
+
+      expect(output).toContain('[STORE 记录写入] trace session_start')
+      expect(output).toContain('[STORE 记录写入] trace session_end')
+      expect(output).not.toContain(
+        'C:\\Users\\asuka\\.claude\\projects\\full\\path.jsonl',
+      )
+      expect(output).not.toContain(
+        'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
+      )
+    }
   })
 
   test('renders failed turn end stop reasons instead of defaulting to completed', () => {
