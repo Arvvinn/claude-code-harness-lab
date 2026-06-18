@@ -6,6 +6,10 @@ import {
 } from '../liveStream.js'
 import type { TraceEvent } from '../types.js'
 
+interface RenderOptions {
+  color?: boolean
+}
+
 function event(overrides: Partial<TraceEvent>): TraceEvent {
   return {
     eventId: overrides.eventId ?? `${overrides.type ?? 'event'}-1`,
@@ -20,13 +24,68 @@ function event(overrides: Partial<TraceEvent>): TraceEvent {
   }
 }
 
-function render(records: TraceEvent[], depth: TraceLiveDepth): string {
-  const stream = createTraceLiveStream({ depth })
+function render(
+  records: TraceEvent[],
+  depth: TraceLiveDepth,
+  options: RenderOptions = {},
+): string {
+  const stream = createTraceLiveStream({ depth, ...options })
 
   return records.flatMap(record => stream.renderRecord(record)).join('')
 }
 
+function coloredStageRecords(): TraceEvent[] {
+  return [
+    event({
+      type: 'turn.start',
+      source: 'query',
+      payload: {
+        querySource: 'repl_main_thread',
+        messages: [{ type: 'user', message: { content: 'inspect traces' } }],
+      },
+    }),
+    event({
+      type: 'api.request_built',
+      source: 'api',
+      payload: {
+        querySource: 'repl_main_thread',
+        model: 'deepseek-v4-pro',
+        messageCount: 1,
+        toolCount: 1,
+      },
+    }),
+    event({
+      type: 'tool.started',
+      source: 'tool',
+      payload: {
+        toolName: 'Read',
+        toolInput: { file_path: 'README.md' },
+      },
+    }),
+  ]
+}
+
 describe('trace live stream', () => {
+  test('renders colored stage labels and dim event metadata', () => {
+    const stream = createTraceLiveStream({ depth: 'learn', color: true })
+    const output = coloredStageRecords()
+      .flatMap(record => stream.renderRecord(record))
+      .join('')
+
+    expect(output).toContain('\x1b[36m[USER 用户输入]\x1b[0m')
+    expect(output).toContain('\x1b[33m[LLM 模型请求]\x1b[0m')
+    expect(output).toContain('\x1b[32m[TOOL 工具]\x1b[0m')
+    expect(output).toContain('\x1b[90m  event=turn.start\x1b[0m')
+    expect(output).toContain('\x1b[90m  event=api.request_built\x1b[0m')
+  })
+
+  test('renders uncolored stage labels when color is disabled', () => {
+    const output = render(coloredStageRecords(), 'learn', { color: false })
+
+    expect(output).toContain('[USER 用户输入]')
+    expect(output).not.toContain('\x1b[')
+  })
+
   test('renders Learn as concise agent-loop narration', () => {
     const output = render(
       [
@@ -144,20 +203,22 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toContain('TURN 1 - read README.md')
-    expect(output).toContain('USER read README.md')
+    expect(output).toContain('[TURN 轮次] 1 - read README.md')
+    expect(output).toContain('[USER 用户输入] read README.md')
     expect(output).toContain(
-      'LOOP messages[] prepared user=1 assistant=0 internal=1 attachments=1 tools=25',
+      '[PREP 构造上下文] messages[] prepared user=1 assistant=0 internal=1 attachments=1 tools=25',
     )
-    expect(output).toContain('LLM request sent deepseek-v4-pro')
-    expect(output).toContain('LLM stream started')
-    expect(output).toContain('LLM tool_use requested Read')
+    expect(output).toContain('[LLM 模型请求] request sent deepseek-v4-pro')
+    expect(output).toContain('[STREAM 模型流] stream started')
+    expect(output).toContain('[STREAM 模型流] tool_use requested Read')
     expect(output).toContain(
-      'TOOL Read started path=D:\\develop\\ClaudeCode\\README.md',
+      '[TOOL 工具] Read started path=D:\\develop\\ClaudeCode\\README.md',
     )
-    expect(output).toContain('TOOL Read ok duration=2ms size=5031B')
-    expect(output).toContain('LOOP tool_result appended, loop back to LLM')
-    expect(output).toContain('DONE completed duration=309.9s')
+    expect(output).toContain('[TOOL 工具] Read ok duration=2ms size=5031B')
+    expect(output).toContain(
+      '[DECISION 决策] tool_result appended, loop back to LLM',
+    )
+    expect(output).toContain('[DONE 完成] completed duration=309.9s')
 
     expect(output).not.toContain('SYSTEM BODY SHOULD NOT PRINT')
     expect(output).not.toContain('HOOK COMMAND SHOULD NOT PRINT')
@@ -167,7 +228,7 @@ describe('trace live stream', () => {
     expect(output).not.toContain('RAW REQUEST SHOULD NOT PRINT')
     expect(output.match(/tool_use requested Read/g)).toHaveLength(1)
     expect(
-      output.match(/LOOP tool_result appended, loop back to LLM/g),
+      output.match(/tool_result appended, loop back to LLM/g),
     ).toHaveLength(1)
   })
 
@@ -244,12 +305,12 @@ describe('trace live stream', () => {
     expect(output).toContain(
       'REQUEST #1 provider=firstParty model=deepseek-v4-pro querySource=repl_main_thread messages=12 tools=25 maxTokens=32000 effort=medium',
     )
-    expect(output).toContain('HOOK PreToolUse done duration=60415ms')
+    expect(output).toContain('[HOOK 钩子] PreToolUse done duration=60415ms')
     expect(output).toContain(
-      'TOOL Read permission allow source=mode duration=0ms',
+      '[TOOL 工具] Read permission allow source=mode duration=0ms',
     )
     expect(output).toContain(
-      'LOOP #1 next_turn toolUse=1 toolResult=1 duration=141715ms',
+      '[DECISION 决策] LOOP #1 next_turn toolUse=1 toolResult=1 duration=141715ms',
     )
     expect(output).not.toContain('PROMPT BODY SHOULD NOT PRINT')
     expect(output).not.toContain('CLAUDE MD SHOULD NOT PRINT')
@@ -273,13 +334,13 @@ describe('trace live stream', () => {
     })
 
     expect(render([sideEvent], 'learn')).toContain(
-      'SIDE generate_session_title collapsed',
+      '[SIDE 旁路任务] generate_session_title collapsed',
     )
     expect(render([sideEvent], 'learn')).not.toContain(
       'SIDE BODY SHOULD NOT PRINT',
     )
     expect(render([sideEvent], 'deep')).toContain(
-      'SIDE generate_session_title model=DeepSeek-V4-Flash messages=1 tools=0',
+      '[SIDE 旁路任务] generate_session_title model=DeepSeek-V4-Flash messages=1 tools=0',
     )
     expect(render([sideEvent], 'deep')).not.toContain(
       'SIDE BODY SHOULD NOT PRINT',
@@ -307,7 +368,9 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toBe('  SIDE session_memory collapsed\n')
+    expect(output).toBe(
+      '  [SIDE 旁路任务] session_memory collapsed\n    event=turn.start\n',
+    )
     expect(output).not.toContain('TURN')
     expect(output).not.toContain('USER')
     expect(output).not.toContain('SIDE MEMORY BODY SHOULD NOT PRINT')
@@ -337,7 +400,9 @@ describe('trace live stream', () => {
       'deep',
     )
 
-    expect(output).toBe('  SIDE session_memory messages=2 tools=2\n')
+    expect(output).toBe(
+      '  [SIDE 旁路任务] session_memory messages=2 tools=2\n    event=turn.start\n',
+    )
     expect(output).not.toContain('TURN')
     expect(output).not.toContain('USER')
     expect(output).not.toContain('SIDE MEMORY BODY SHOULD NOT PRINT')
@@ -361,7 +426,7 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toContain('DONE model_error')
+    expect(output).toContain('[DONE 完成] model_error')
     expect(output).not.toContain('DONE completed')
   })
 
@@ -391,7 +456,7 @@ describe('trace live stream', () => {
     expect(render(records, 'learn')).not.toContain('content_block_delta')
     expect(render(records, 'learn')).not.toContain('RAW DELTA SHOULD NOT PRINT')
     expect(render(records, 'deep')).toContain(
-      'STREAM #1 content_block_delta text_delta',
+      '[STREAM 模型流] #1 content_block_delta text_delta',
     )
     expect(render(records, 'deep')).not.toContain('RAW DELTA SHOULD NOT PRINT')
   })
@@ -435,11 +500,11 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toContain('HOOK PostToolUse done duration=120419ms')
+    expect(output).toContain('[HOOK 钩子] PostToolUse done duration=120419ms')
     expect(output).toContain(
-      'TOOL Write started path=D:\\develop\\ClaudeCode\\notes.txt',
+      '[TOOL 工具] Write started path=D:\\develop\\ClaudeCode\\notes.txt',
     )
-    expect(output).toContain('TOOL Write ok duration=12ms size=42B')
+    expect(output).toContain('[TOOL 工具] Write ok duration=12ms size=42B')
     expect(output).not.toContain('HOOK COMMAND SHOULD NOT PRINT')
     expect(output).not.toContain('TOOL BODY SHOULD NOT PRINT')
     expect(output).not.toContain('TOOL RESULT BODY SHOULD NOT PRINT')

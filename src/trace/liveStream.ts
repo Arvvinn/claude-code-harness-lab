@@ -5,6 +5,51 @@ export type TraceLiveDepth = 'learn' | 'deep'
 
 export interface TraceLiveStreamOptions {
   depth: TraceLiveDepth
+  color?: boolean
+}
+
+type StreamStage =
+  | 'TURN'
+  | 'USER'
+  | 'PREP'
+  | 'LLM'
+  | 'STREAM'
+  | 'DECISION'
+  | 'TOOL'
+  | 'HOOK'
+  | 'SIDE'
+  | 'STORE'
+  | 'DONE'
+  | 'ERROR'
+
+const STAGE_LABELS: Record<StreamStage, string> = {
+  TURN: 'TURN 轮次',
+  USER: 'USER 用户输入',
+  PREP: 'PREP 构造上下文',
+  LLM: 'LLM 模型请求',
+  STREAM: 'STREAM 模型流',
+  DECISION: 'DECISION 决策',
+  TOOL: 'TOOL 工具',
+  HOOK: 'HOOK 钩子',
+  SIDE: 'SIDE 旁路任务',
+  STORE: 'STORE 记录写入',
+  DONE: 'DONE 完成',
+  ERROR: 'ERROR 错误',
+}
+
+const STAGE_COLORS: Record<StreamStage, string> = {
+  TURN: '1;36',
+  USER: '36',
+  PREP: '35',
+  LLM: '33',
+  STREAM: '93',
+  DECISION: '1;37',
+  TOOL: '32',
+  HOOK: '95',
+  SIDE: '90',
+  STORE: '34',
+  DONE: '32',
+  ERROR: '31',
 }
 
 export interface TraceLiveHeaderOptions {
@@ -32,6 +77,7 @@ interface TraceLiveState {
   currentRequestNumber: number
   shownToolUseIds: Set<string>
   learnLoopBackRenderedBeforeLoopEnd: boolean
+  color: boolean
   pendingMessageCounts?: MessageCounts
 }
 
@@ -61,6 +107,7 @@ export function createTraceLiveStream(
     currentRequestNumber: 0,
     shownToolUseIds: new Set(),
     learnLoopBackRenderedBeforeLoopEnd: false,
+    color: options.color ?? false,
   }
 
   return {
@@ -79,51 +126,81 @@ function renderRecord(
 
   switch (record.type) {
     case 'turn.start':
-      return renderTurnStart(payload, state, depth)
+      return renderTurnStart(payload, state, depth, record.type)
     case 'api.request_built':
-      return renderRequestBuilt(payload, state, depth)
+      return renderRequestBuilt(payload, state, depth, record.type)
     case 'api.stream_event':
-      return renderStreamEvent(payload, state, depth)
+      return renderStreamEvent(payload, state, depth, record.type)
     case 'tool.detected':
-      return renderToolDetected(payload, state, depth)
+      return renderToolDetected(payload, state, depth, record.type)
     case 'tool.permission_result':
-      return renderPermission(payload, depth)
+      return renderPermission(payload, depth, record.type, state.color)
     case 'tool.started':
-      return renderToolStarted(payload)
+      return renderToolStarted(payload, record.type, state.color)
     case 'tool.result':
     case 'tool.error':
     case 'tool.cancelled':
-      return renderToolDone(record.type, payload, depth)
+      return renderToolDone(record.type, payload, depth, state.color)
     case 'hook.started':
     case 'hook.result':
-      return renderHook(record.type, payload, depth)
+      return renderHook(record.type, payload, depth, state.color)
     case 'transcript.appended':
-      return renderTranscriptAppend(payload, state, depth)
+      return renderTranscriptAppend(payload, state, depth, record.type)
     case 'query.loop_end':
-      return renderLoopEnd(payload, state, depth)
+      return renderLoopEnd(payload, state, depth, record.type)
     case 'turn.end':
-      return renderTurnEnd(payload, depth)
+      return renderTurnEnd(payload, depth, record.type, state.color)
     case 'api.retry':
-      return renderRetry(payload)
+      return renderRetry(payload, record.type, state.color)
     case 'api.error':
     case 'trace.read_error':
-      return [
-        `  ERROR ${record.type} ${compactText(getString(payload, 'message')) ?? 'collapsed'}\n`,
-      ]
+      return stageLine(
+        'ERROR',
+        `${record.type} ${compactText(getString(payload, 'message')) ?? 'collapsed'}`,
+        record.type,
+        state.color,
+      )
     default:
       return []
   }
+}
+
+function stageLine(
+  stage: StreamStage,
+  text: string,
+  eventType: string,
+  color: boolean,
+): string[] {
+  const metadata = color
+    ? colorize(`  event=${eventType}`, '90', color)
+    : `event=${eventType}`
+
+  return [
+    `  ${colorize(`[${STAGE_LABELS[stage]}]`, STAGE_COLORS[stage], color)} ${text}\n`,
+    `    ${metadata}\n`,
+  ]
+}
+
+function colorize(text: string, code: string, enabled: boolean): string {
+  return enabled ? `\x1b[${code}m${text}\x1b[0m` : text
 }
 
 function renderTurnStart(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  eventType: string,
 ): string[] {
   const querySource = getString(payload, 'querySource')
 
   if (!isMainQuerySource(querySource)) {
-    return renderSideTurnStart(payload, querySource, depth)
+    return renderSideTurnStart(
+      payload,
+      querySource,
+      depth,
+      eventType,
+      state.color,
+    )
   }
 
   state.turnNumber += 1
@@ -135,15 +212,29 @@ function renderTurnStart(
     compactText(getString(payload, 'prompt')) ??
     'input collapsed'
   const source = querySource ?? 'unknown'
-  const lines = [`TURN ${state.turnNumber} - ${userText}\n`]
+  const lines = stageLine(
+    'TURN',
+    `${state.turnNumber} - ${userText}`,
+    eventType,
+    state.color,
+  )
 
   if (depth === 'learn') {
-    lines.push(`  USER ${userText}\n`)
+    lines.push(...stageLine('USER', userText, eventType, state.color))
     return lines
   }
 
-  lines.push(`  USER INPUT source=${source} text=${userText}\n`)
-  lines.push(`  ${formatHarnessContext(payload)}\n`)
+  lines.push(
+    ...stageLine(
+      'USER',
+      `INPUT source=${source} text=${userText}`,
+      eventType,
+      state.color,
+    ),
+  )
+  lines.push(
+    ...stageLine('PREP', formatHarnessContext(payload), eventType, state.color),
+  )
 
   return lines
 }
@@ -152,14 +243,16 @@ function renderSideTurnStart(
   payload: Record<string, unknown>,
   querySource: string | undefined,
   depth: TraceLiveDepth,
+  eventType: string,
+  color: boolean,
 ): string[] {
   const source = querySource ?? 'side'
 
   if (depth === 'learn') {
-    return [`  SIDE ${source} collapsed\n`]
+    return stageLine('SIDE', `${source} collapsed`, eventType, color)
   }
 
-  const parts = [`SIDE ${source}`]
+  const parts = [source]
   const messageCount = getCount(payload, 'messageCount', 'messages')
   const toolCount = getCount(payload, 'toolCount', 'tools')
 
@@ -175,13 +268,14 @@ function renderSideTurnStart(
     parts.push('collapsed')
   }
 
-  return [`  ${parts.join(' ')}\n`]
+  return stageLine('SIDE', parts.join(' '), eventType, color)
 }
 
 function renderRequestBuilt(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  eventType: string,
 ): string[] {
   const querySource = getString(payload, 'querySource')
   const model = getString(payload, 'model') ?? 'unknown-model'
@@ -192,21 +286,26 @@ function renderRequestBuilt(
     const source = querySource ?? 'side'
 
     if (depth === 'learn') {
-      return [`  SIDE ${source} collapsed\n`]
+      return stageLine('SIDE', `${source} collapsed`, eventType, state.color)
     }
 
-    return [
-      `  SIDE ${source} model=${model} messages=${messageCount ?? 0} tools=${toolCount ?? 0}\n`,
-    ]
+    return stageLine(
+      'SIDE',
+      `${source} model=${model} messages=${messageCount ?? 0} tools=${toolCount ?? 0}`,
+      eventType,
+      state.color,
+    )
   }
 
   state.requestNumber += 1
   state.currentRequestNumber = state.requestNumber
 
-  const lines = renderPreparedMessages(payload, state, depth)
+  const lines = renderPreparedMessages(payload, state, depth, eventType)
 
   if (depth === 'learn') {
-    lines.push(`  LLM request sent ${model}\n`)
+    lines.push(
+      ...stageLine('LLM', `request sent ${model}`, eventType, state.color),
+    )
     return lines
   }
 
@@ -237,7 +336,9 @@ function renderRequestBuilt(
     requestParts.push(`effort=${effort}`)
   }
 
-  lines.push(`  ${requestParts.join(' ')}\n`)
+  lines.push(
+    ...stageLine('LLM', requestParts.join(' '), eventType, state.color),
+  )
   return lines
 }
 
@@ -245,6 +346,7 @@ function renderPreparedMessages(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  eventType: string,
 ): string[] {
   const counts = state.pendingMessageCounts
   if (counts === undefined) {
@@ -255,20 +357,27 @@ function renderPreparedMessages(
   const toolCount = getCount(payload, 'toolCount', 'tools') ?? 0
 
   if (depth === 'learn') {
-    return [
-      `  LOOP messages[] prepared user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}\n`,
-    ]
+    return stageLine(
+      'PREP',
+      `messages[] prepared user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}`,
+      eventType,
+      state.color,
+    )
   }
 
-  return [
-    `  HARNESS messages user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}\n`,
-  ]
+  return stageLine(
+    'PREP',
+    `HARNESS messages user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}`,
+    eventType,
+    state.color,
+  )
 }
 
 function renderStreamEvent(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  traceEventType: string,
 ): string[] {
   const eventType = getString(payload, 'eventType') ?? 'stream_event'
 
@@ -278,19 +387,27 @@ function renderStreamEvent(
     }
 
     const deltaType = getString(payload, 'deltaType') ?? 'delta'
-    return [
-      `  STREAM #${state.currentRequestNumber} content_block_delta ${deltaType}\n`,
-    ]
+    return stageLine(
+      'STREAM',
+      `#${state.currentRequestNumber} content_block_delta ${deltaType}`,
+      traceEventType,
+      state.color,
+    )
   }
 
   if (eventType === 'message_start') {
     return depth === 'learn'
-      ? ['  LLM stream started\n']
-      : [`  STREAM #${state.currentRequestNumber} message_start\n`]
+      ? stageLine('STREAM', 'stream started', traceEventType, state.color)
+      : stageLine(
+          'STREAM',
+          `#${state.currentRequestNumber} message_start`,
+          traceEventType,
+          state.color,
+        )
   }
 
   if (eventType === 'content_block_start') {
-    return renderContentBlockStart(payload, state, depth)
+    return renderContentBlockStart(payload, state, depth, traceEventType)
   }
 
   if (eventType === 'message_delta') {
@@ -301,18 +418,29 @@ function renderStreamEvent(
     const stopReason = getString(payload, 'stopReason')
     const suffix = stopReason === undefined ? '' : ` stop_reason=${stopReason}`
 
-    return [`  STREAM #${state.currentRequestNumber} message_delta${suffix}\n`]
+    return stageLine(
+      'STREAM',
+      `#${state.currentRequestNumber} message_delta${suffix}`,
+      traceEventType,
+      state.color,
+    )
   }
 
   return depth === 'learn'
     ? []
-    : [`  STREAM #${state.currentRequestNumber} ${eventType}\n`]
+    : stageLine(
+        'STREAM',
+        `#${state.currentRequestNumber} ${eventType}`,
+        traceEventType,
+        state.color,
+      )
 }
 
 function renderContentBlockStart(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  eventType: string,
 ): string[] {
   const blockType = getString(payload, 'contentBlockType') ?? 'block'
   const blockName =
@@ -327,10 +455,18 @@ function renderContentBlockStart(
     const toolName = blockName ?? 'unknown'
 
     return depth === 'learn'
-      ? [`  LLM tool_use requested ${toolName}\n`]
-      : [
-          `  STREAM #${state.currentRequestNumber} content_block_start tool_use ${toolName}\n`,
-        ]
+      ? stageLine(
+          'STREAM',
+          `tool_use requested ${toolName}`,
+          eventType,
+          state.color,
+        )
+      : stageLine(
+          'STREAM',
+          `#${state.currentRequestNumber} content_block_start tool_use ${toolName}`,
+          eventType,
+          state.color,
+        )
   }
 
   if (depth === 'learn') {
@@ -338,15 +474,19 @@ function renderContentBlockStart(
   }
 
   const suffix = blockName === undefined ? '' : ` ${blockName}`
-  return [
-    `  STREAM #${state.currentRequestNumber} content_block_start ${blockType}${suffix}\n`,
-  ]
+  return stageLine(
+    'STREAM',
+    `#${state.currentRequestNumber} content_block_start ${blockType}${suffix}`,
+    eventType,
+    state.color,
+  )
 }
 
 function renderToolDetected(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  eventType: string,
 ): string[] {
   const toolUseId = getString(payload, 'toolUseId')
 
@@ -361,13 +501,25 @@ function renderToolDetected(
   const toolName = getToolName(payload)
 
   return depth === 'learn'
-    ? [`  LLM tool_use requested ${toolName}\n`]
-    : [`  TOOL ${toolName} detected\n`]
+    ? stageLine(
+        'STREAM',
+        `tool_use requested ${toolName}`,
+        eventType,
+        state.color,
+      )
+    : stageLine(
+        'STREAM',
+        `tool_use detected ${toolName}`,
+        eventType,
+        state.color,
+      )
 }
 
 function renderPermission(
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
+  eventType: string,
+  color: boolean,
 ): string[] {
   if (depth === 'learn') {
     return []
@@ -377,7 +529,7 @@ function renderPermission(
   const decision = getString(payload, 'decision') ?? 'unknown'
   const source = getString(payload, 'source')
   const durationMs = getNumber(payload, 'durationMs')
-  const parts = [`TOOL ${toolName} permission ${decision}`]
+  const parts = [`${toolName} permission ${decision}`]
 
   if (source !== undefined) {
     parts.push(`source=${source}`)
@@ -387,32 +539,37 @@ function renderPermission(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return [`  ${parts.join(' ')}\n`]
+  return stageLine('TOOL', parts.join(' '), eventType, color)
 }
 
-function renderToolStarted(payload: Record<string, unknown>): string[] {
+function renderToolStarted(
+  payload: Record<string, unknown>,
+  eventType: string,
+  color: boolean,
+): string[] {
   const toolName = getToolName(payload)
-  const parts = [`TOOL ${toolName} started`]
+  const parts = [`${toolName} started`]
   const path = getToolPath(payload)
 
   if (path !== undefined) {
     parts.push(`path=${path}`)
   }
 
-  return [`  ${parts.join(' ')}\n`]
+  return stageLine('TOOL', parts.join(' '), eventType, color)
 }
 
 function renderToolDone(
   eventType: TraceDisplayRecord['type'],
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
+  color: boolean,
 ): string[] {
   const toolName = getToolName(payload)
   const status = getToolStatus(eventType, payload)
   const parts =
     depth === 'deep'
-      ? [`TOOL ${toolName} result ${status}`]
-      : [`TOOL ${toolName} ${status}`]
+      ? [`${toolName} result ${status}`]
+      : [`${toolName} ${status}`]
   const durationMs = getNumber(payload, 'durationMs')
 
   if (durationMs !== undefined) {
@@ -428,13 +585,14 @@ function renderToolDone(
     parts.push(`size=${sizeBytes}B`)
   }
 
-  return [`  ${parts.join(' ')}\n`]
+  return stageLine('TOOL', parts.join(' '), eventType, color)
 }
 
 function renderHook(
   eventType: TraceDisplayRecord['type'],
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
+  color: boolean,
 ): string[] {
   const hookEvent =
     getString(payload, 'hookEvent') ??
@@ -442,7 +600,9 @@ function renderHook(
     'Hook'
 
   if (eventType === 'hook.started') {
-    return depth === 'deep' ? [`  HOOK ${hookEvent} started\n`] : []
+    return depth === 'deep'
+      ? stageLine('HOOK', `${hookEvent} started`, eventType, color)
+      : []
   }
 
   const status = getString(payload, 'status')
@@ -452,19 +612,20 @@ function renderHook(
     return []
   }
 
-  const parts = [`HOOK ${hookEvent}`, formatHookStatus(status)]
+  const parts = [hookEvent, formatHookStatus(status)]
 
   if (durationMs !== undefined) {
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return [`  ${parts.join(' ')}\n`]
+  return stageLine('HOOK', parts.join(' '), eventType, color)
 }
 
 function renderTranscriptAppend(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  eventType: string,
 ): string[] {
   const entryType = getString(payload, 'entryType') ?? 'entry'
 
@@ -478,19 +639,30 @@ function renderTranscriptAppend(
     }
 
     state.learnLoopBackRenderedBeforeLoopEnd = true
-    return ['  LOOP tool_result appended, loop back to LLM\n']
+    return stageLine(
+      'DECISION',
+      'tool_result appended, loop back to LLM',
+      eventType,
+      state.color,
+    )
   }
 
   const byteCount = getNumber(payload, 'byteCount')
   const suffix = byteCount === undefined ? '' : ` bytes=${byteCount}`
 
-  return [`  HARNESS transcript appended ${entryType}${suffix}\n`]
+  return stageLine(
+    'STORE',
+    `HARNESS transcript appended ${entryType}${suffix}`,
+    eventType,
+    state.color,
+  )
 }
 
 function renderLoopEnd(
   payload: Record<string, unknown>,
   state: TraceLiveState,
   depth: TraceLiveDepth,
+  eventType: string,
 ): string[] {
   const stopReason = getString(payload, 'stopReason') ?? 'loop_end'
 
@@ -501,11 +673,16 @@ function renderLoopEnd(
         return []
       }
 
-      return ['  LOOP tool_result appended, loop back to LLM\n']
+      return stageLine(
+        'DECISION',
+        'tool_result appended, loop back to LLM',
+        eventType,
+        state.color,
+      )
     }
 
     state.learnLoopBackRenderedBeforeLoopEnd = false
-    return [`  LOOP ${stopReason}\n`]
+    return stageLine('DECISION', `LOOP ${stopReason}`, eventType, state.color)
   }
 
   const loopIndex = getNumber(payload, 'loopIndex') ?? 0
@@ -526,10 +703,14 @@ function renderLoopEnd(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return [`  ${parts.join(' ')}\n`]
+  return stageLine('DECISION', parts.join(' '), eventType, state.color)
 }
 
-function renderRetry(payload: Record<string, unknown>): string[] {
+function renderRetry(
+  payload: Record<string, unknown>,
+  eventType: string,
+  color: boolean,
+): string[] {
   const retryType = getString(payload, 'retryType') ?? 'api retry'
   const parts = [`RETRY ${retryType}`]
 
@@ -553,14 +734,19 @@ function renderRetry(payload: Record<string, unknown>): string[] {
     getNumber(payload, 'adjustedMaxTokens'),
   )
 
-  return [
-    `  ${parts.length === 1 ? 'RETRY api retry collapsed' : parts.join(' ')}\n`,
-  ]
+  return stageLine(
+    'LLM',
+    parts.length === 1 ? 'RETRY api retry collapsed' : parts.join(' '),
+    eventType,
+    color,
+  )
 }
 
 function renderTurnEnd(
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
+  eventType: string,
+  color: boolean,
 ): string[] {
   const resultReason = getTurnEndResultReason(payload)
   const durationMs = getNumber(payload, 'durationMs')
@@ -571,10 +757,10 @@ function renderTurnEnd(
         ? ''
         : ` duration=${formatHumanDurationMs(durationMs)}`
 
-    return [`  DONE ${resultReason}${duration}\n`]
+    return stageLine('DONE', `${resultReason}${duration}`, eventType, color)
   }
 
-  const parts = [`DONE ${resultReason}`]
+  const parts = [resultReason]
 
   if (durationMs !== undefined) {
     parts.push(`duration=${durationMs}ms`)
@@ -585,7 +771,7 @@ function renderTurnEnd(
     parts.push(`finalMessages=${finalMessageCount}`)
   }
 
-  return [`  ${parts.join(' ')}\n`]
+  return stageLine('DONE', parts.join(' '), eventType, color)
 }
 
 function getTurnEndResultReason(payload: Record<string, unknown>): string {
