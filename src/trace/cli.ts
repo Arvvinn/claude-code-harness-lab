@@ -172,6 +172,42 @@ function readTraceRecordsFromText(
   return records
 }
 
+function getLatestMainTurnRecords(
+  records: TraceDisplayRecord[],
+): TraceDisplayRecord[] {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]
+
+    if (record?.type === 'turn.start' && isMainTraceRecord(record)) {
+      return records.slice(index)
+    }
+  }
+
+  return []
+}
+
+function isMainTraceRecord(record: TraceDisplayRecord): boolean {
+  const payload = record.payload
+
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return false
+  }
+
+  const querySource = (payload as Record<string, unknown>).querySource
+
+  return (
+    querySource === undefined ||
+    querySource === 'repl_main_thread' ||
+    (typeof querySource === 'string' &&
+      querySource.startsWith('repl_main_thread:')) ||
+    querySource === 'sdk'
+  )
+}
+
 function getStatusText(): string {
   const config = loadTraceConfig()
   const activeSession = readActiveTraceSession()
@@ -402,6 +438,16 @@ async function writeTail(
         eventsPath: target.eventsPath,
       }),
     )
+  }
+
+  if (!raw && follow && startAtEnd) {
+    for (const record of getLatestMainTurnRecords(
+      readTraceRecords(target.sessionId),
+    )) {
+      for (const rendered of stream.renderRecord(record)) {
+        writeText(io.stdout, rendered)
+      }
+    }
   }
 
   for (;;) {

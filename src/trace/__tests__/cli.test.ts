@@ -372,17 +372,37 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('[USER')
   })
 
-  test('tail starts at EOF and streams newly appended Learn events', async () => {
+  test('tail orients to the latest main turn then streams newly appended Learn events', async () => {
     saveTraceConfig({ mode: 'learn', autoTailWindow: true })
     appendTraceEvent(
       makeTraceEvent({
+        eventId: 'event-old-turn',
+        sequence: 1,
         type: 'turn.start',
         source: 'query',
         payload: {
+          querySource: 'repl_main_thread',
           messages: [
             {
               type: 'user',
-              message: { content: 'old prompt should not print' },
+              message: { content: 'old turn should not orient' },
+            },
+          ],
+        },
+      }),
+    )
+    appendTraceEvent(
+      makeTraceEvent({
+        eventId: 'event-latest-turn',
+        sequence: 2,
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'latest turn should orient' },
             },
           ],
         },
@@ -397,30 +417,34 @@ describe('trace CLI', () => {
     await delay(50)
     appendTraceEvent(
       makeTraceEvent({
-        eventId: 'event-2',
-        sequence: 2,
-        type: 'turn.start',
-        source: 'query',
+        eventId: 'event-new-tool',
+        sequence: 3,
+        type: 'tool.started',
+        source: 'tool',
         payload: {
-          messages: [
-            {
-              type: 'user',
-              message: { content: 'new prompt prints' },
-            },
-          ],
+          toolName: 'Read',
+          toolUseId: 'toolu_1',
+          toolInput: { file_path: 'README.md' },
         },
       }),
     )
 
     const result = await tailPromise
+    const raw = await runTrace(['tail', 'session-1', '--raw'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 50,
+    })
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain('Trace Live - Learn')
-    expect(result.stdout).toContain('new prompt prints')
-    expect(result.stdout).not.toContain('old prompt should not print')
+    expect(result.stdout).toContain('latest turn should orient')
+    expect(result.stdout).toContain('Read started')
+    expect(result.stdout).not.toContain('old turn should not orient')
     expect(result.stdout).not.toContain('\x1b[2J\x1b[H')
     expect(result.stdout).not.toContain('Agent Loop Live')
     expect(result.stdout).not.toContain('"type":"turn.start"')
+    expect(raw.stdout).not.toContain('latest turn should orient')
   })
 
   test('tail --deep streams Deep events', async () => {
@@ -568,6 +592,7 @@ describe('trace CLI', () => {
         type: 'turn.start',
         source: 'query',
         payload: {
+          querySource: 'background',
           messages: [
             {
               type: 'user',
@@ -622,6 +647,7 @@ describe('trace CLI', () => {
         type: 'turn.start',
         source: 'query',
         payload: {
+          querySource: 'background',
           messages: [
             {
               type: 'user',
