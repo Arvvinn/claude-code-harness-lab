@@ -662,6 +662,60 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('用户输入')
   })
 
+  test('raw tail ignores language renderer and prints exact JSONL', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    const line = JSON.stringify(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'raw tail language prompt' },
+            },
+          ],
+        },
+      }),
+    )
+    const eventsPath = getTraceEventsPath('session-1')
+    await mkdir(dirname(eventsPath), { recursive: true })
+    await writeFile(eventsPath, line)
+
+    const result = await runTrace([
+      'tail',
+      'session-1',
+      '--raw',
+      '--lang',
+      'en',
+    ])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stderr).toBe('')
+    expect(result.stdout).toBe(`${line}\n`)
+    expect(result.stdout).not.toContain('Language: en')
+    expect(result.stdout).not.toContain('[USER / User Input]')
+    expect(result.stdout).not.toContain('Trace Live - Learn')
+  })
+
+  test.each([
+    [
+      'unsupported value',
+      ['tail', 'session-1', '--lang', 'jp'],
+      'Invalid trace language: jp',
+    ],
+    [
+      'missing value',
+      ['tail', 'session-1', '--lang'],
+      'Invalid trace language: <missing>',
+    ],
+  ])('tail rejects %s for trace language', async (_, args, message) => {
+    const result = await runTrace(args)
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain(message)
+  })
+
   test('tail orientation slices from the latest main turn and keeps only later side turns', async () => {
     saveTraceConfig({ mode: 'learn', autoTailWindow: true })
     appendTraceEvent(
