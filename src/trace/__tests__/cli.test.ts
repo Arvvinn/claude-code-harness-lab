@@ -192,12 +192,94 @@ describe('trace CLI', () => {
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain('Trace Replay - Learn')
-    expect(result.stdout).toContain('[USER 用户输入]')
-    expect(result.stdout).toContain('[LLM 模型请求]')
+    expect(result.stdout).toContain('Language: zh+en')
+    expect(result.stdout).toContain('[USER 用户输入 / User Input]')
+    expect(result.stdout).toContain('[LLM 模型请求 / Model Request]')
     expect(result.stdout).toContain('explain the project')
     expect(result.stdout).not.toContain('Agent Loop Replay')
     expect(result.stdout).not.toContain('[SYSTEM]')
     expect(result.stdout).not.toContain('rawRequestParams')
+  })
+
+  test('replay defaults to bilingual stream labels', async () => {
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'read README.md' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(['replay', 'session-1'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Language: zh+en')
+    expect(result.stdout).toContain('[USER 用户输入 / User Input]')
+  })
+
+  test('replay supports English-only labels', async () => {
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'read README.md' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(['replay', 'session-1', '--lang', 'en'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Language: en')
+    expect(result.stdout).toContain('[USER / User Input]')
+    expect(result.stdout).not.toContain('用户输入')
+  })
+
+  test('replay accepts language before the session id', async () => {
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'read README.md' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(['replay', '--lang', 'en', 'session-1'])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Language: en')
+    expect(result.stdout).toContain('[USER / User Input]')
+  })
+
+  test('rejects invalid trace language values', async () => {
+    const result = await runTrace(['replay', 'session-1', '--lang', 'jp'])
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('Invalid trace language: jp')
+  })
+
+  test('rejects missing trace language value', async () => {
+    const result = await runTrace(['replay', 'session-1', '--lang'])
+
+    expect(result.exitCode).toBe(1)
+    expect(result.stderr).toContain('Invalid trace language: <missing>')
   })
 
   test('replay uses colored labels when stdout is a TTY', async () => {
@@ -292,7 +374,7 @@ describe('trace CLI', () => {
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain('Trace Replay - Deep')
-    expect(result.stdout).toContain('[PREP 构造上下文]')
+    expect(result.stdout).toContain('[PREP 构造上下文 / Context Prep]')
     expect(result.stdout).toContain('messages=')
   })
 
@@ -371,8 +453,10 @@ describe('trace CLI', () => {
 
     expect(panel.exitCode).toBe(0)
     expect(panel.stdout).toContain('Trace Replay - Learn')
-    expect(panel.stdout).toContain('[USER 用户输入] read README.md')
-    expect(panel.stdout).toContain('[TOOL 工具] Edit started')
+    expect(panel.stdout).toContain(
+      '[USER 用户输入 / User Input] read README.md',
+    )
+    expect(panel.stdout).toContain('[TOOL 工具 / Tool] Edit started')
     for (const noisyString of noisyStrings) {
       expect(panel.stdout).not.toContain(noisyString)
     }
@@ -442,6 +526,35 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('Trace Replay - Learn')
     expect(result.stdout).not.toContain('Trace Replay - Deep')
     expect(result.stdout).not.toContain('[USER')
+  })
+
+  test('raw replay ignores language renderer', async () => {
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        payload: {
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'raw prompt' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace([
+      'replay',
+      'session-1',
+      '--raw',
+      '--lang',
+      'en',
+    ])
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('"type":"turn.start"')
+    expect(result.stdout).not.toContain('Language: en')
+    expect(result.stdout).not.toContain('[USER / User Input]')
   })
 
   test('tail orients to the latest main turn then streams newly appended Learn events', async () => {
@@ -517,6 +630,36 @@ describe('trace CLI', () => {
     expect(result.stdout).not.toContain('Agent Loop Live')
     expect(result.stdout).not.toContain('"type":"turn.start"')
     expect(raw.stdout).not.toContain('latest turn should orient')
+  })
+
+  test('tail supports English-only labels', async () => {
+    saveTraceConfig({ mode: 'learn', autoTailWindow: true })
+    appendTraceEvent(
+      makeTraceEvent({
+        type: 'turn.start',
+        source: 'query',
+        payload: {
+          querySource: 'repl_main_thread',
+          messages: [
+            {
+              type: 'user',
+              message: { content: 'tail language prompt' },
+            },
+          ],
+        },
+      }),
+    )
+
+    const result = await runTrace(['tail', 'session-1', '--lang', 'en'], {
+      follow: true,
+      pollIntervalMs: 10,
+      idleTimeoutMs: 50,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('Language: en')
+    expect(result.stdout).toContain('[USER / User Input] tail language prompt')
+    expect(result.stdout).not.toContain('用户输入')
   })
 
   test('tail orientation slices from the latest main turn and keeps only later side turns', async () => {
