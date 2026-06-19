@@ -66,6 +66,7 @@ export interface TraceLiveHeaderOptions {
   eventsPath: string
   startedAt?: string
   timeZone?: string
+  language?: TraceDisplayLanguage
 }
 
 export interface TraceLiveStream {
@@ -100,6 +101,7 @@ interface TraceLiveState {
 export function renderTraceLiveHeader(options: TraceLiveHeaderOptions): string {
   const title =
     options.depth === 'deep' ? 'Trace Live - Deep' : 'Trace Live - Learn'
+  const language = options.language ?? 'both'
   const startedAt = formatTraceLocalTime(
     options.startedAt ?? new Date().toISOString(),
     options.timeZone === undefined ? {} : { timeZone: options.timeZone },
@@ -110,8 +112,18 @@ export function renderTraceLiveHeader(options: TraceLiveHeaderOptions): string {
     `Started: ${startedAt}`,
     `Session: ${options.sessionId}`,
     `Source: ${options.eventsPath}`,
+    `Language: ${formatLanguageMarker(language)}`,
+    'Pattern: User -> messages[] -> LLM -> decision -> tools -> results -> loop/return',
     '',
   ].join('\n')
+}
+
+function formatLanguageMarker(language: TraceDisplayLanguage): string {
+  if (language === 'both') {
+    return 'zh+en'
+  }
+
+  return language
 }
 
 export function createTraceLiveStream(

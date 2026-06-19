@@ -1247,4 +1247,42 @@ describe('trace live stream', () => {
     expect(header).toContain('Session: live-session')
     expect(header).toContain('Source: C:\\trace\\events.jsonl')
   })
+
+  test('renders bilingual header legend by default', () => {
+    const header = renderTraceLiveHeader({
+      depth: 'learn',
+      sessionId: 'live-session',
+      eventsPath: 'C:\\trace\\events.jsonl',
+      startedAt: '2026-06-17T16:03:47.556Z',
+      timeZone: 'Asia/Shanghai',
+    })
+
+    expect(header).toContain('Language: zh+en')
+    expect(header).toContain(
+      'Pattern: User -> messages[] -> LLM -> decision -> tools -> results -> loop/return',
+    )
+  })
+
+  test('renders English header language marker', () => {
+    const header = renderTraceLiveHeader({
+      depth: 'deep',
+      sessionId: 'live-session',
+      eventsPath: 'C:\\trace\\events.jsonl',
+      language: 'en',
+    })
+
+    expect(header).toContain('Language: en')
+    expect(header).toContain('Trace Live - Deep')
+  })
+
+  test('renders Chinese header language marker', () => {
+    const header = renderTraceLiveHeader({
+      depth: 'learn',
+      sessionId: 'live-session',
+      eventsPath: 'C:\\trace\\events.jsonl',
+      language: 'zh',
+    })
+
+    expect(header).toContain('Language: zh')
+  })
 })
