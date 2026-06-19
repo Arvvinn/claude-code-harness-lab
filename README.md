@@ -150,6 +150,36 @@ bun run dev trace replay <session-id> --deep
 bun run dev trace replay <session-id> --raw
 ```
 
+### Trace 查看语言
+
+默认视图是中英双语：
+
+```bash
+claude trace tail
+claude trace replay <sessionId>
+```
+
+英文视图：
+
+```bash
+claude trace tail --lang en
+claude trace replay <sessionId> --lang en
+```
+
+深度英文视图：
+
+```bash
+claude trace tail --deep --lang en
+claude trace replay <sessionId> --deep --lang en
+```
+
+原始 JSONL：
+
+```bash
+claude trace tail --raw
+claude trace replay <sessionId> --raw
+```
+
 ## 验证命令
 
 日常修改后至少运行：
