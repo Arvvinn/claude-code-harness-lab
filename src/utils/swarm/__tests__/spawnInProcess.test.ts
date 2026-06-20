@@ -1,115 +1,33 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { rmSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
-import { getDefaultAppState } from '../../../state/AppStateStore'
-import { readMailbox, writeToMailbox } from '../../teammateMailbox'
-import {
-  killInProcessTeammateByAgentId,
-  spawnInProcessTeammate,
-} from '../spawnInProcess'
+/**
+ * spawnInProcess.test.ts
+ *
+ * Thin subprocess wrapper for spawnInProcess.runner.ts. The runner exercises
+ * in-process teammate state and CLAUDE_CONFIG_DIR-backed files, so keep it out
+ * of the shared full-suite bun:test process.
+ */
 
-let tempHome: string
-let previousConfigDir: string | undefined
+import { describe, test } from 'bun:test'
+import { relative, resolve } from 'path'
 
-beforeEach(() => {
-  previousConfigDir = process.env.CLAUDE_CONFIG_DIR
-  tempHome = join(
-    tmpdir(),
-    `spawn-in-process-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-  )
-  process.env.CLAUDE_CONFIG_DIR = tempHome
-})
+const PROJECT_ROOT = resolve(__dirname, '..', '..', '..', '..')
+const RUNNER_ABS = resolve(__dirname, 'spawnInProcess.runner.ts')
+const RUNNER_REL = './' + relative(PROJECT_ROOT, RUNNER_ABS).replace(/\\/g, '/')
 
-afterEach(() => {
-  if (previousConfigDir === undefined) {
-    delete process.env.CLAUDE_CONFIG_DIR
-  } else {
-    process.env.CLAUDE_CONFIG_DIR = previousConfigDir
-  }
-  rmSync(tempHome, { recursive: true, force: true })
-})
-
-describe('killInProcessTeammateByAgentId', () => {
-  test('registers a real in-process teammate task and mailbox', async () => {
-    let state = getDefaultAppState() as any
-    const result = await spawnInProcessTeammate(
-      {
-        name: 'worker',
-        teamName: 'alpha',
-        prompt: 'smoke test task',
-        color: 'blue',
-        planModeRequired: false,
-      },
-      {
-        setAppState(updater) {
-          state = updater(state)
-        },
-        toolUseId: 'toolu_smoke',
-      },
-    )
-
-    expect(result.success).toBe(true)
-    expect(result.agentId).toBe('worker@alpha')
-    expect(result.taskId).toBeString()
-    expect(state.tasks[result.taskId!].type).toBe('in_process_teammate')
-    expect(state.tasks[result.taskId!].identity.agentId).toBe('worker@alpha')
-    expect(state.tasks[result.taskId!].messages).toEqual([])
-
-    await writeToMailbox(
-      'worker',
-      {
-        from: 'team-lead',
-        text: 'mailbox smoke',
-        timestamp: new Date(0).toISOString(),
-      },
-      'alpha',
-    )
-    const messages = await readMailbox('worker', 'alpha')
-
-    expect(messages).toHaveLength(1)
-    expect(messages[0]!.text).toBe('mailbox smoke')
-    expect(messages[0]!.read).toBe(false)
-  })
-
-  test('aborts the running teammate and removes it from team context by agent id', () => {
-    const abortController = new AbortController()
-    let state: any = {
-      teamContext: {
-        teamName: 'alpha',
-        teammates: {
-          'worker@alpha': {
-            name: 'worker',
-          },
-        },
-      },
-      tasks: {
-        teammate_task_1: {
-          id: 'teammate_task_1',
-          type: 'in_process_teammate',
-          status: 'running',
-          identity: {
-            agentId: 'worker@alpha',
-            agentName: 'worker',
-            teamName: 'alpha',
-            planModeRequired: false,
-            parentSessionId: 'session',
-          },
-          abortController,
-          pendingUserMessages: [],
-          onIdleCallbacks: [],
-          messages: [],
-        },
-      },
-    }
-
-    const killed = killInProcessTeammateByAgentId('worker@alpha', updater => {
-      state = updater(state)
+describe('spawnInProcess', () => {
+  test('runs in-process teammate tests in isolated subprocess', async () => {
+    const proc = Bun.spawn(['bun', 'test', RUNNER_REL], {
+      cwd: PROJECT_ROOT,
+      stdout: 'pipe',
+      stderr: 'pipe',
     })
-
-    expect(killed).toBe(true)
-    expect(abortController.signal.aborted).toBe(true)
-    expect(state.tasks.teammate_task_1.status).toBe('killed')
-    expect(state.teamContext.teammates['worker@alpha']).toBeUndefined()
-  })
+    const code = await proc.exited
+    if (code !== 0) {
+      const stderr = await new Response(proc.stderr).text()
+      const stdout = await new Response(proc.stdout).text()
+      const output = (stderr + '\n' + stdout).slice(-3000)
+      throw new Error(
+        `spawnInProcess subprocess failed (exit ${code}):\n${output}`,
+      )
+    }
+  }, 60_000)
 })
