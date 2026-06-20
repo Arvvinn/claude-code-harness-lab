@@ -2,12 +2,14 @@ import { describe, expect, test } from 'bun:test'
 import {
   createTraceLiveStream,
   renderTraceLiveHeader,
+  type TraceDisplayLanguage,
   type TraceLiveDepth,
 } from '../liveStream.js'
 import type { TraceEvent } from '../types.js'
 
 interface RenderOptions {
   color?: boolean
+  language?: TraceDisplayLanguage
 }
 
 function event(overrides: Partial<TraceEvent>): TraceEvent {
@@ -66,15 +68,76 @@ function coloredStageRecords(): TraceEvent[] {
 }
 
 describe('trace live stream', () => {
+  test('renders bilingual stage labels by default', () => {
+    const output = render(coloredStageRecords(), 'learn')
+
+    expect(output).toContain('[TURN 轮次 / Turn]')
+    expect(output).toContain('[USER 用户输入 / User Input]')
+    expect(output).toContain('[PREP 构造上下文 / Context Prep]')
+    expect(output).toContain('[LLM 模型请求 / Model Request]')
+    expect(output).toContain('[TOOL 工具 / Tool] Read started')
+  })
+
+  test('renders English-only labels when language is en', () => {
+    const output = render(coloredStageRecords(), 'learn', { language: 'en' })
+
+    expect(output).toContain('[TURN / Turn]')
+    expect(output).toContain('[USER / User Input]')
+    expect(output).toContain('[TOOL / Tool] Read started')
+    expect(output).not.toContain('用户输入')
+    expect(output).not.toContain('工具]')
+  })
+
+  test('renders Chinese-only labels when language is zh', () => {
+    const output = render(coloredStageRecords(), 'learn', { language: 'zh' })
+
+    expect(output).toContain('[TURN 轮次]')
+    expect(output).toContain('[USER 用户输入]')
+    expect(output).not.toContain('User Input')
+  })
+
+  test('starts each visible turn as a separated block', () => {
+    const output = render(
+      [
+        event({
+          type: 'turn.start',
+          payload: {
+            messages: [{ type: 'user', message: { content: 'first' } }],
+          },
+        }),
+        event({
+          type: 'turn.end',
+          payload: { resultReason: 'completed' },
+        }),
+        event({
+          type: 'turn.start',
+          payload: {
+            messages: [{ type: 'user', message: { content: 'second' } }],
+          },
+        }),
+      ],
+      'learn',
+    )
+
+    expect(output).toContain('\n\n  [TURN 轮次 / Turn] 2 - second')
+  })
+
+  test('preserves English tool identifiers in localized labels', () => {
+    const output = render(coloredStageRecords(), 'learn', { language: 'zh' })
+
+    expect(output).toContain('[TOOL 工具] Read started')
+    expect(output).not.toContain('读取 started')
+  })
+
   test('renders colored stage labels and dim event metadata', () => {
     const stream = createTraceLiveStream({ depth: 'learn', color: true })
     const output = coloredStageRecords()
       .flatMap(record => stream.renderRecord(record))
       .join('')
 
-    expect(output).toContain('\x1b[36m[USER 用户输入]\x1b[0m')
-    expect(output).toContain('\x1b[33m[LLM 模型请求]\x1b[0m')
-    expect(output).toContain('\x1b[32m[TOOL 工具]\x1b[0m')
+    expect(output).toContain('\x1b[36m[USER 用户输入 / User Input]\x1b[0m')
+    expect(output).toContain('\x1b[33m[LLM 模型请求 / Model Request]\x1b[0m')
+    expect(output).toContain('\x1b[32m[TOOL 工具 / Tool]\x1b[0m')
     expect(output).toContain('    \x1b[90mevent=turn.start\x1b[0m')
     expect(output).toContain('    \x1b[90mevent=api.request_built\x1b[0m')
   })
@@ -82,7 +145,7 @@ describe('trace live stream', () => {
   test('renders uncolored stage labels without event metadata when color is disabled', () => {
     const output = render(coloredStageRecords(), 'learn', { color: false })
 
-    expect(output).toContain('[USER 用户输入]')
+    expect(output).toContain('[USER 用户输入 / User Input]')
     expect(output).not.toContain('event=')
     expect(output).not.toContain('\x1b[')
   })
@@ -105,8 +168,8 @@ describe('trace live stream', () => {
       { color: true },
     )
 
-    expect(output).toContain('\x1b[1;36m[TURN 轮次]\x1b[0m')
-    expect(output).toContain('\x1b[36m[USER 用户输入]\x1b[0m')
+    expect(output).toContain('\x1b[1;36m[TURN 轮次 / Turn]\x1b[0m')
+    expect(output).toContain('\x1b[36m[USER 用户输入 / User Input]\x1b[0m')
     expect(output.match(/event=turn\.start/g)).toHaveLength(1)
     expect(output).toContain('    \x1b[90mevent=turn.start\x1b[0m')
     expect(output).not.toContain('\x1b[90m    event=turn.start\x1b[0m')
@@ -229,22 +292,28 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toContain('[TURN 轮次] 1 - read README.md')
-    expect(output).toContain('[USER 用户输入] read README.md')
+    expect(output).toContain('[TURN 轮次 / Turn] 1 - read README.md')
+    expect(output).toContain('[USER 用户输入 / User Input] read README.md')
     expect(output).toContain(
-      '[PREP 构造上下文] messages[] prepared user=1 assistant=0 internal=1 attachments=1 tools=25',
+      '[PREP 构造上下文 / Context Prep] messages[] prepared user=1 assistant=0 internal=1 attachments=1 tools=25',
     )
-    expect(output).toContain('[LLM 模型请求] request sent deepseek-v4-pro')
-    expect(output).toContain('[STREAM 模型流] stream started')
-    expect(output).toContain('[STREAM 模型流] tool_use requested Read')
     expect(output).toContain(
-      '[TOOL 工具] Read started path=D:\\develop\\ClaudeCode\\README.md',
+      '[LLM 模型请求 / Model Request] request sent deepseek-v4-pro',
     )
-    expect(output).toContain('[TOOL 工具] Read ok duration=2ms size=5031B')
+    expect(output).toContain('[STREAM 模型流 / Model Stream] stream started')
     expect(output).toContain(
-      '[DECISION 决策] tool_result appended, loop back to LLM',
+      '[STREAM 模型流 / Model Stream] tool_use requested Read',
     )
-    expect(output).toContain('[DONE 完成] completed duration=309.9s')
+    expect(output).toContain(
+      '[TOOL 工具 / Tool] Read started path=D:\\develop\\ClaudeCode\\README.md',
+    )
+    expect(output).toContain(
+      '[TOOL 工具 / Tool] Read ok duration=2ms size=5031B',
+    )
+    expect(output).toContain(
+      '[DECISION 决策 / Decision] tool_result appended, loop back to LLM',
+    )
+    expect(output).toContain('[DONE 完成 / Done] completed duration=309.9s')
 
     expect(output).not.toContain('SYSTEM BODY SHOULD NOT PRINT')
     expect(output).not.toContain('HOOK COMMAND SHOULD NOT PRINT')
@@ -331,12 +400,14 @@ describe('trace live stream', () => {
     expect(output).toContain(
       'REQUEST #1 provider=firstParty model=deepseek-v4-pro querySource=repl_main_thread messages=12 tools=25 maxTokens=32000 effort=medium',
     )
-    expect(output).toContain('[HOOK 钩子] PreToolUse done duration=60415ms')
     expect(output).toContain(
-      '[TOOL 工具] Read permission allow source=mode duration=0ms',
+      '[HOOK 钩子 / Hook] PreToolUse done duration=60415ms',
     )
     expect(output).toContain(
-      '[DECISION 决策] LOOP #1 next_turn toolUse=1 toolResult=1 duration=141715ms',
+      '[TOOL 工具 / Tool] Read permission allow source=mode duration=0ms',
+    )
+    expect(output).toContain(
+      '[DECISION 决策 / Decision] LOOP #1 next_turn toolUse=1 toolResult=1 duration=141715ms',
     )
     expect(output).not.toContain('PROMPT BODY SHOULD NOT PRINT')
     expect(output).not.toContain('CLAUDE MD SHOULD NOT PRINT')
@@ -529,11 +600,11 @@ describe('trace live stream', () => {
       })
 
       expect(render([sideEvent], 'learn')).toContain(
-        `[SIDE 旁路任务] ${sideCase.source} collapsed`,
+        `[SIDE 旁路任务 / Side Task] ${sideCase.source} collapsed`,
       )
       expect(render([sideEvent], 'learn')).not.toContain(sideCase.body)
       expect(render([sideEvent], 'deep')).toContain(
-        `[SIDE 旁路任务] ${sideCase.source} model=${sideCase.model} messages=${sideCase.messages} tools=${sideCase.tools}`,
+        `[SIDE 旁路任务 / Side Task] ${sideCase.source} model=${sideCase.model} messages=${sideCase.messages} tools=${sideCase.tools}`,
       )
       expect(render([sideEvent], 'deep')).not.toContain(sideCase.body)
     }
@@ -560,7 +631,9 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toContain('[SIDE 旁路任务] session_memory collapsed')
+    expect(output).toContain(
+      '[SIDE 旁路任务 / Side Task] session_memory collapsed',
+    )
     expect(output).not.toContain('event=')
     expect(output).not.toContain('TURN')
     expect(output).not.toContain('USER')
@@ -592,7 +665,7 @@ describe('trace live stream', () => {
     )
 
     expect(output).toContain(
-      '[SIDE 旁路任务] session_memory messages=2 tools=2',
+      '[SIDE 旁路任务 / Side Task] session_memory messages=2 tools=2',
     )
     expect(output).not.toContain('event=')
     expect(output).not.toContain('TURN')
@@ -647,16 +720,16 @@ describe('trace live stream', () => {
       const output = render(records, depth)
 
       expect(output).toContain(
-        '[STORE 记录写入] transcript appended entry=user bytes=512',
+        '[STORE 记录写入 / Storage] transcript appended entry=user bytes=512',
       )
       expect(output).toContain(
-        '[STORE 记录写入] transcript appended entry=assistant bytes=915',
+        '[STORE 记录写入 / Storage] transcript appended entry=assistant bytes=915',
       )
       expect(output).toContain(
-        '[STORE 记录写入] transcript appended entry=tool_result bytes=628',
+        '[STORE 记录写入 / Storage] transcript appended entry=tool_result bytes=628',
       )
       expect(output).toContain(
-        '[STORE 记录写入] transcript appended entry=system bytes=117',
+        '[STORE 记录写入 / Storage] transcript appended entry=system bytes=117',
       )
       expect(output).not.toContain(
         'NOISY FULL TRANSCRIPT BODY SHOULD NOT PRINT',
@@ -1012,8 +1085,8 @@ describe('trace live stream', () => {
     for (const depth of ['learn', 'deep'] as const) {
       const output = render(records, depth)
 
-      expect(output).toContain('[STORE 记录写入] trace session_start')
-      expect(output).toContain('[STORE 记录写入] trace session_end')
+      expect(output).toContain('[STORE 记录写入 / Storage] trace session_start')
+      expect(output).toContain('[STORE 记录写入 / Storage] trace session_end')
       expect(output).not.toContain(
         'C:\\Users\\asuka\\.claude\\projects\\full\\path.jsonl',
       )
@@ -1040,7 +1113,7 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toContain('[DONE 完成] model_error')
+    expect(output).toContain('[DONE 完成 / Done] model_error')
     expect(output).not.toContain('DONE completed')
   })
 
@@ -1070,7 +1143,7 @@ describe('trace live stream', () => {
     expect(render(records, 'learn')).not.toContain('content_block_delta')
     expect(render(records, 'learn')).not.toContain('RAW DELTA SHOULD NOT PRINT')
     expect(render(records, 'deep')).toContain(
-      '[STREAM 模型流] #1 content_block_delta text_delta',
+      '[STREAM 模型流 / Model Stream] #1 content_block_delta text_delta',
     )
     expect(render(records, 'deep')).not.toContain('RAW DELTA SHOULD NOT PRINT')
   })
@@ -1114,11 +1187,15 @@ describe('trace live stream', () => {
       'learn',
     )
 
-    expect(output).toContain('[HOOK 钩子] PostToolUse done duration=120419ms')
     expect(output).toContain(
-      '[TOOL 工具] Write started path=D:\\develop\\ClaudeCode\\notes.txt',
+      '[HOOK 钩子 / Hook] PostToolUse done duration=120419ms',
     )
-    expect(output).toContain('[TOOL 工具] Write ok duration=12ms size=42B')
+    expect(output).toContain(
+      '[TOOL 工具 / Tool] Write started path=D:\\develop\\ClaudeCode\\notes.txt',
+    )
+    expect(output).toContain(
+      '[TOOL 工具 / Tool] Write ok duration=12ms size=42B',
+    )
     expect(output).not.toContain('HOOK COMMAND SHOULD NOT PRINT')
     expect(output).not.toContain('TOOL BODY SHOULD NOT PRINT')
     expect(output).not.toContain('TOOL RESULT BODY SHOULD NOT PRINT')
@@ -1169,5 +1246,43 @@ describe('trace live stream', () => {
     expect(header).toContain('Started: 2026-06-18 00:03:47 local')
     expect(header).toContain('Session: live-session')
     expect(header).toContain('Source: C:\\trace\\events.jsonl')
+  })
+
+  test('renders bilingual header legend by default', () => {
+    const header = renderTraceLiveHeader({
+      depth: 'learn',
+      sessionId: 'live-session',
+      eventsPath: 'C:\\trace\\events.jsonl',
+      startedAt: '2026-06-17T16:03:47.556Z',
+      timeZone: 'Asia/Shanghai',
+    })
+
+    expect(header).toContain('Language: zh+en')
+    expect(header).toContain(
+      'Pattern: User -> messages[] -> LLM -> decision -> tools -> results -> loop/return',
+    )
+  })
+
+  test('renders English header language marker', () => {
+    const header = renderTraceLiveHeader({
+      depth: 'deep',
+      sessionId: 'live-session',
+      eventsPath: 'C:\\trace\\events.jsonl',
+      language: 'en',
+    })
+
+    expect(header).toContain('Language: en')
+    expect(header).toContain('Trace Live - Deep')
+  })
+
+  test('renders Chinese header language marker', () => {
+    const header = renderTraceLiveHeader({
+      depth: 'learn',
+      sessionId: 'live-session',
+      eventsPath: 'C:\\trace\\events.jsonl',
+      language: 'zh',
+    })
+
+    expect(header).toContain('Language: zh')
   })
 })

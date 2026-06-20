@@ -112,14 +112,17 @@ describe('harness trace smoke coverage', () => {
 
     expect(result.exitCode).toBe(0)
     expect(result.stdout).toContain('Trace Replay - Learn')
-    expect(result.stdout).toContain('[USER 用户输入]')
+    expect(result.stdout).toContain('Language: zh+en')
+    expect(result.stdout).toContain(
+      'Pattern: User -> messages[] -> LLM -> decision -> tools -> results -> loop/return',
+    )
+    expect(result.stdout).toContain('[USER 用户输入 / User Input]')
     expect(result.stdout).toContain('summarize trace smoke')
-    expect(result.stdout).toContain('[LLM 模型请求]')
+    expect(result.stdout).toContain('[LLM 模型请求 / Model Request]')
     expect(result.stdout).toContain('claude-sonnet')
-    expect(result.stdout).toContain('[TOOL 工具]')
+    expect(result.stdout).toContain('[TOOL 工具 / Tool]')
     expect(result.stdout).toContain('Read ok')
     expect(result.stdout).not.toContain('Agent Loop Replay')
-    expect(result.stdout).not.toContain('Pattern: User -> messages[] -> LLM')
     expect(result.stdout).not.toContain('turn.start inputChars=12')
 
     const rawResult = await runTrace(['replay', 'session-1', '--raw'])

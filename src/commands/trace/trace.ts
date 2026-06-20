@@ -29,12 +29,7 @@ export const call: LocalCommandCall = async args => {
     case 'tail':
       return {
         type: 'display',
-        value: [
-          'Trace tail command:',
-          TRACE_TAIL_COMMAND,
-          'Deep tail command:',
-          getTraceTailCommand({ mode: 'full' }),
-        ].join('\n'),
+        value: formatTraceViewerCommands(),
       }
     case 'off':
       endTraceSession({ reason: 'trace command disabled tracing' })
@@ -97,6 +92,7 @@ function formatTraceStatus(): string {
     lines.push('Session: none')
     lines.push('Events: none')
     lines.push(`Tail: ${tailCommand}`)
+    lines.push(...formatTraceLanguageCommandLines())
 
     return lines.join('\n')
   }
@@ -113,23 +109,56 @@ function formatTraceStatus(): string {
   }
 
   lines.push(`Tail: ${tailCommand}`)
+  lines.push(...formatTraceLanguageCommandLines())
 
   return lines.join('\n')
 }
 
 function formatTailWindowResult(result: TraceTailWindowLaunchResult): string {
   if (result.ok && result.reason === 'already_launched') {
-    return `Tail window: already launched\nTail: ${result.command}`
+    return [
+      'Tail window: already launched',
+      `Tail: ${result.command}`,
+      ...formatTraceLanguageCommandLines(),
+    ].join('\n')
   }
 
   if (result.ok) {
     const launcher = result.launcher ? ` via ${result.launcher}` : ''
 
-    return `Tail window: launched${launcher}\nTail: ${result.command}`
+    return [
+      `Tail window: launched${launcher}`,
+      `Tail: ${result.command}`,
+      ...formatTraceLanguageCommandLines(),
+    ].join('\n')
   }
 
   const reason = result.reason ?? 'unavailable'
   const error = result.error ? ` (${result.error})` : ''
 
-  return `Tail window: auto-launch unavailable: ${reason}${error}\nRun:\n${result.command}`
+  return [
+    `Tail window: auto-launch unavailable: ${reason}${error}`,
+    'Run:',
+    result.command,
+    ...formatTraceLanguageCommandLines(),
+  ].join('\n')
+}
+
+function formatTraceViewerCommands(): string {
+  return formatTraceViewerCommandLines().join('\n')
+}
+
+function formatTraceViewerCommandLines(): string[] {
+  return [
+    `Tail: ${TRACE_TAIL_COMMAND}`,
+    `Deep: ${getTraceTailCommand({ mode: 'full' })}`,
+    ...formatTraceLanguageCommandLines(),
+  ]
+}
+
+function formatTraceLanguageCommandLines(): string[] {
+  return [
+    'English: claude trace tail --lang en',
+    'Deep English: claude trace tail --deep --lang en',
+  ]
 }

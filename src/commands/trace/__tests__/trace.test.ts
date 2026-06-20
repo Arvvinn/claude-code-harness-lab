@@ -95,6 +95,14 @@ describe('/trace command', () => {
       type: 'display',
       value: expect.stringContaining('Tail: claude trace tail'),
     })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('claude trace tail --lang en'),
+    })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('claude trace tail --deep --lang en'),
+    })
     expect(readTraceEvents(sessionId!).map(event => event.type)).toEqual([
       'trace.session_start',
       'trace.session_end',
@@ -227,7 +235,15 @@ describe('/trace command', () => {
     })
     expect(result).toEqual({
       type: 'display',
+      value: expect.stringContaining('claude trace tail --lang en'),
+    })
+    expect(result).toEqual({
+      type: 'display',
       value: expect.stringContaining('claude trace tail --deep'),
+    })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('claude trace tail --deep --lang en'),
     })
     expect(readActiveTraceSession()).toBeNull()
   })
@@ -251,6 +267,14 @@ describe('/trace command', () => {
     expect(result).toEqual({
       type: 'display',
       value: expect.stringContaining('claude trace tail'),
+    })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('claude trace tail --lang en'),
+    })
+    expect(result).toEqual({
+      type: 'display',
+      value: expect.stringContaining('claude trace tail --deep --lang en'),
     })
   })
 })

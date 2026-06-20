@@ -2,10 +2,12 @@ import type { TraceDisplayRecord } from './format.js'
 import { formatTraceLocalTime } from './time.js'
 
 export type TraceLiveDepth = 'learn' | 'deep'
+export type TraceDisplayLanguage = 'both' | 'zh' | 'en'
 
 export interface TraceLiveStreamOptions {
   depth: TraceLiveDepth
   color?: boolean
+  language?: TraceDisplayLanguage
 }
 
 type StreamStage =
@@ -22,19 +24,25 @@ type StreamStage =
   | 'DONE'
   | 'ERROR'
 
-const STAGE_LABELS: Record<StreamStage, string> = {
-  TURN: 'TURN 轮次',
-  USER: 'USER 用户输入',
-  PREP: 'PREP 构造上下文',
-  LLM: 'LLM 模型请求',
-  STREAM: 'STREAM 模型流',
-  DECISION: 'DECISION 决策',
-  TOOL: 'TOOL 工具',
-  HOOK: 'HOOK 钩子',
-  SIDE: 'SIDE 旁路任务',
-  STORE: 'STORE 记录写入',
-  DONE: 'DONE 完成',
-  ERROR: 'ERROR 错误',
+interface StageCopy {
+  code: string
+  zh: string
+  en: string
+}
+
+const STAGE_COPY: Record<StreamStage, StageCopy> = {
+  TURN: { code: 'TURN', zh: '轮次', en: 'Turn' },
+  USER: { code: 'USER', zh: '用户输入', en: 'User Input' },
+  PREP: { code: 'PREP', zh: '构造上下文', en: 'Context Prep' },
+  LLM: { code: 'LLM', zh: '模型请求', en: 'Model Request' },
+  STREAM: { code: 'STREAM', zh: '模型流', en: 'Model Stream' },
+  DECISION: { code: 'DECISION', zh: '决策', en: 'Decision' },
+  TOOL: { code: 'TOOL', zh: '工具', en: 'Tool' },
+  HOOK: { code: 'HOOK', zh: '钩子', en: 'Hook' },
+  SIDE: { code: 'SIDE', zh: '旁路任务', en: 'Side Task' },
+  STORE: { code: 'STORE', zh: '记录写入', en: 'Storage' },
+  DONE: { code: 'DONE', zh: '完成', en: 'Done' },
+  ERROR: { code: 'ERROR', zh: '错误', en: 'Error' },
 }
 
 const STAGE_COLORS: Record<StreamStage, string> = {
@@ -58,6 +66,7 @@ export interface TraceLiveHeaderOptions {
   eventsPath: string
   startedAt?: string
   timeZone?: string
+  language?: TraceDisplayLanguage
 }
 
 export interface TraceLiveStream {
@@ -82,6 +91,8 @@ interface TraceLiveState {
   learnSideTranscriptStoreEntryTypesSeenStack: Set<string>[]
   learnLoopBackRenderedBeforeLoopEnd: boolean
   color: boolean
+  language: TraceDisplayLanguage
+  hasRenderedVisibleTurn: boolean
   mainTurnHasReadableUser: boolean
   mainTurnHarnessContextRendered: boolean
   pendingMessageCounts?: MessageCounts
@@ -90,6 +101,7 @@ interface TraceLiveState {
 export function renderTraceLiveHeader(options: TraceLiveHeaderOptions): string {
   const title =
     options.depth === 'deep' ? 'Trace Live - Deep' : 'Trace Live - Learn'
+  const language = options.language ?? 'both'
   const startedAt = formatTraceLocalTime(
     options.startedAt ?? new Date().toISOString(),
     options.timeZone === undefined ? {} : { timeZone: options.timeZone },
@@ -100,8 +112,18 @@ export function renderTraceLiveHeader(options: TraceLiveHeaderOptions): string {
     `Started: ${startedAt}`,
     `Session: ${options.sessionId}`,
     `Source: ${options.eventsPath}`,
+    `Language: ${formatLanguageMarker(language)}`,
+    'Pattern: User -> messages[] -> LLM -> decision -> tools -> results -> loop/return',
     '',
   ].join('\n')
+}
+
+function formatLanguageMarker(language: TraceDisplayLanguage): string {
+  if (language === 'both') {
+    return 'zh+en'
+  }
+
+  return language
 }
 
 export function createTraceLiveStream(
@@ -118,6 +140,8 @@ export function createTraceLiveStream(
     learnSideTranscriptStoreEntryTypesSeenStack: [],
     learnLoopBackRenderedBeforeLoopEnd: false,
     color: options.color ?? false,
+    language: options.language ?? 'both',
+    hasRenderedVisibleTurn: false,
     mainTurnHasReadableUser: false,
     mainTurnHarnessContextRendered: false,
   }
@@ -153,7 +177,7 @@ function renderRecordLines(
   switch (record.type) {
     case 'trace.session_start':
     case 'trace.session_end':
-      return renderTraceSession(record.type, state.color)
+      return renderTraceSession(record.type, state)
     case 'turn.start':
       return renderTurnStart(payload, state, depth)
     case 'query.loop_start':
@@ -165,16 +189,16 @@ function renderRecordLines(
     case 'tool.detected':
       return renderToolDetected(payload, state, depth)
     case 'tool.permission_result':
-      return renderPermission(payload, depth, state.color)
+      return renderPermission(payload, depth, state)
     case 'tool.started':
-      return renderToolStarted(payload, state.color)
+      return renderToolStarted(payload, state)
     case 'tool.result':
     case 'tool.error':
     case 'tool.cancelled':
-      return renderToolDone(record.type, payload, depth, state.color)
+      return renderToolDone(record.type, payload, depth, state)
     case 'hook.started':
     case 'hook.result':
-      return renderHook(record.type, payload, depth, state.color)
+      return renderHook(record.type, payload, depth, state)
     case 'transcript.appended':
       return renderTranscriptAppend(payload, state, depth)
     case 'query.loop_end':
@@ -182,22 +206,43 @@ function renderRecordLines(
     case 'turn.end':
       return renderTurnEnd(payload, state, depth)
     case 'api.retry':
-      return renderRetry(payload, state.color)
+      return renderRetry(payload, state)
     case 'api.error':
     case 'trace.read_error':
       return stageLine(
         'ERROR',
         `${record.type} ${compactText(getString(payload, 'message')) ?? 'collapsed'}`,
-        state.color,
+        state,
       )
     default:
       return []
   }
 }
 
-function stageLine(stage: StreamStage, text: string, color: boolean): string[] {
+function formatStageLabel(
+  stage: StreamStage,
+  language: TraceDisplayLanguage,
+): string {
+  const copy = STAGE_COPY[stage]
+
+  if (language === 'en') {
+    return `${copy.code} / ${copy.en}`
+  }
+
+  if (language === 'zh') {
+    return `${copy.code} ${copy.zh}`
+  }
+
+  return `${copy.code} ${copy.zh} / ${copy.en}`
+}
+
+function stageLine(
+  stage: StreamStage,
+  text: string,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
+): string[] {
   return [
-    `  ${colorize(`[${STAGE_LABELS[stage]}]`, STAGE_COLORS[stage], color)} ${text}\n`,
+    `  ${colorize(`[${formatStageLabel(stage, state.language)}]`, STAGE_COLORS[stage], state.color)} ${text}\n`,
   ]
 }
 
@@ -221,7 +266,7 @@ function renderTurnStart(
       state.learnSideTranscriptStoreEntryTypesSeenStack.push(new Set())
     }
 
-    return renderSideTurnStart(payload, querySource, depth, state.color)
+    return renderSideTurnStart(payload, querySource, depth, state)
   }
 
   state.turnNumber += 1
@@ -242,30 +287,24 @@ function renderTurnStart(
   const userText = extractedUserText ?? 'input collapsed'
   state.mainTurnHasReadableUser = extractedUserText !== undefined
   const source = querySource ?? 'unknown'
-  const lines = stageLine(
-    'TURN',
-    `${state.turnNumber} - ${userText}`,
-    state.color,
-  )
+  const prefix = state.hasRenderedVisibleTurn ? ['\n'] : []
+  state.hasRenderedVisibleTurn = true
+  const lines = stageLine('TURN', `${state.turnNumber} - ${userText}`, state)
 
   if (depth === 'learn') {
-    lines.push(...stageLine('USER', userText, state.color))
-    return lines
+    lines.push(...stageLine('USER', userText, state))
+    return [...prefix, ...lines]
   }
 
   lines.push(
-    ...stageLine(
-      'USER',
-      `INPUT source=${source} text=${userText}`,
-      state.color,
-    ),
+    ...stageLine('USER', `INPUT source=${source} text=${userText}`, state),
   )
   if (hasHarnessContext(payload)) {
-    lines.push(...stageLine('PREP', formatHarnessContext(payload), state.color))
+    lines.push(...stageLine('PREP', formatHarnessContext(payload), state))
     state.mainTurnHarnessContextRendered = true
   }
 
-  return lines
+  return [...prefix, ...lines]
 }
 
 function renderQueryLoopStart(
@@ -292,12 +331,8 @@ function renderQueryLoopStart(
   if (!state.mainTurnHasReadableUser && userText !== undefined) {
     lines.push(
       ...(depth === 'learn'
-        ? stageLine('USER', userText, state.color)
-        : stageLine(
-            'USER',
-            `INPUT source=${source} text=${userText}`,
-            state.color,
-          )),
+        ? stageLine('USER', userText, state)
+        : stageLine('USER', `INPUT source=${source} text=${userText}`, state)),
     )
     state.mainTurnHasReadableUser = true
   }
@@ -310,12 +345,10 @@ function renderQueryLoopStart(
 
   if (depth === 'deep') {
     if (!state.mainTurnHarnessContextRendered && hasHarnessContext(payload)) {
-      lines.push(
-        ...stageLine('PREP', formatHarnessContext(payload), state.color),
-      )
+      lines.push(...stageLine('PREP', formatHarnessContext(payload), state))
       state.mainTurnHarnessContextRendered = true
     }
-    lines.push(...stageLine('LLM', formatLoopStart(payload), state.color))
+    lines.push(...stageLine('LLM', formatLoopStart(payload), state))
   }
 
   return lines
@@ -325,12 +358,12 @@ function renderSideTurnStart(
   payload: Record<string, unknown>,
   querySource: string | undefined,
   depth: TraceLiveDepth,
-  color: boolean,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
 ): string[] {
   const source = formatSideSource(querySource ?? 'side')
 
   if (depth === 'learn') {
-    return stageLine('SIDE', `${source} collapsed`, color)
+    return stageLine('SIDE', `${source} collapsed`, state)
   }
 
   const parts = [source]
@@ -354,7 +387,7 @@ function renderSideTurnStart(
     parts.push('collapsed')
   }
 
-  return stageLine('SIDE', parts.join(' '), color)
+  return stageLine('SIDE', parts.join(' '), state)
 }
 
 function renderRequestBuilt(
@@ -371,13 +404,13 @@ function renderRequestBuilt(
     const source = formatSideSource(querySource ?? 'side')
 
     if (depth === 'learn') {
-      return stageLine('SIDE', `${source} collapsed`, state.color)
+      return stageLine('SIDE', `${source} collapsed`, state)
     }
 
     return stageLine(
       'SIDE',
       `${source} model=${model} messages=${messageCount ?? 0} tools=${toolCount ?? 0}`,
-      state.color,
+      state,
     )
   }
 
@@ -387,7 +420,7 @@ function renderRequestBuilt(
   const lines = renderPreparedMessages(payload, state, depth)
 
   if (depth === 'learn') {
-    lines.push(...stageLine('LLM', `request sent ${model}`, state.color))
+    lines.push(...stageLine('LLM', `request sent ${model}`, state))
     return lines
   }
 
@@ -418,7 +451,7 @@ function renderRequestBuilt(
     requestParts.push(`effort=${effort}`)
   }
 
-  lines.push(...stageLine('LLM', requestParts.join(' '), state.color))
+  lines.push(...stageLine('LLM', requestParts.join(' '), state))
   return lines
 }
 
@@ -450,14 +483,14 @@ function renderMessagePreparation(
     return stageLine(
       'PREP',
       `messages[] prepared user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}`,
-      state.color,
+      state,
     )
   }
 
   return stageLine(
     'PREP',
     `HARNESS messages user=${counts.user} assistant=${counts.assistant} internal=${counts.internal} attachments=${counts.attachments} tools=${toolCount}`,
-    state.color,
+    state,
   )
 }
 
@@ -497,17 +530,17 @@ function renderStreamEvent(
     return stageLine(
       'STREAM',
       `#${state.currentRequestNumber} content_block_delta ${deltaType}`,
-      state.color,
+      state,
     )
   }
 
   if (eventType === 'message_start') {
     return depth === 'learn'
-      ? stageLine('STREAM', 'stream started', state.color)
+      ? stageLine('STREAM', 'stream started', state)
       : stageLine(
           'STREAM',
           `#${state.currentRequestNumber} message_start`,
-          state.color,
+          state,
         )
   }
 
@@ -526,17 +559,13 @@ function renderStreamEvent(
     return stageLine(
       'STREAM',
       `#${state.currentRequestNumber} message_delta${suffix}`,
-      state.color,
+      state,
     )
   }
 
   return depth === 'learn'
     ? []
-    : stageLine(
-        'STREAM',
-        `#${state.currentRequestNumber} ${eventType}`,
-        state.color,
-      )
+    : stageLine('STREAM', `#${state.currentRequestNumber} ${eventType}`, state)
 }
 
 function renderContentBlockStart(
@@ -557,11 +586,11 @@ function renderContentBlockStart(
     const toolName = blockName ?? 'unknown'
 
     return depth === 'learn'
-      ? stageLine('STREAM', `tool_use requested ${toolName}`, state.color)
+      ? stageLine('STREAM', `tool_use requested ${toolName}`, state)
       : stageLine(
           'STREAM',
           `#${state.currentRequestNumber} content_block_start tool_use ${toolName}`,
-          state.color,
+          state,
         )
   }
 
@@ -573,7 +602,7 @@ function renderContentBlockStart(
   return stageLine(
     'STREAM',
     `#${state.currentRequestNumber} content_block_start ${blockType}${suffix}`,
-    state.color,
+    state,
   )
 }
 
@@ -595,14 +624,14 @@ function renderToolDetected(
   const toolName = getToolName(payload)
 
   return depth === 'learn'
-    ? stageLine('STREAM', `tool_use requested ${toolName}`, state.color)
-    : stageLine('STREAM', `tool_use detected ${toolName}`, state.color)
+    ? stageLine('STREAM', `tool_use requested ${toolName}`, state)
+    : stageLine('STREAM', `tool_use detected ${toolName}`, state)
 }
 
 function renderPermission(
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
-  color: boolean,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
 ): string[] {
   if (depth === 'learn') {
     return []
@@ -622,12 +651,12 @@ function renderPermission(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return stageLine('TOOL', parts.join(' '), color)
+  return stageLine('TOOL', parts.join(' '), state)
 }
 
 function renderToolStarted(
   payload: Record<string, unknown>,
-  color: boolean,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
 ): string[] {
   const toolName = getToolName(payload)
   const parts = [`${toolName} started`]
@@ -637,14 +666,14 @@ function renderToolStarted(
     parts.push(`path=${path}`)
   }
 
-  return stageLine('TOOL', parts.join(' '), color)
+  return stageLine('TOOL', parts.join(' '), state)
 }
 
 function renderToolDone(
   eventType: TraceDisplayRecord['type'],
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
-  color: boolean,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
 ): string[] {
   const toolName = getToolName(payload)
   const status = getToolStatus(eventType, payload)
@@ -667,14 +696,14 @@ function renderToolDone(
     parts.push(`size=${sizeBytes}B`)
   }
 
-  return stageLine('TOOL', parts.join(' '), color)
+  return stageLine('TOOL', parts.join(' '), state)
 }
 
 function renderHook(
   eventType: TraceDisplayRecord['type'],
   payload: Record<string, unknown>,
   depth: TraceLiveDepth,
-  color: boolean,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
 ): string[] {
   const hookEvent =
     getString(payload, 'hookEvent') ??
@@ -683,7 +712,7 @@ function renderHook(
 
   if (eventType === 'hook.started') {
     return depth === 'deep'
-      ? stageLine('HOOK', `${hookEvent} started`, color)
+      ? stageLine('HOOK', `${hookEvent} started`, state)
       : []
   }
 
@@ -700,7 +729,7 @@ function renderHook(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return stageLine('HOOK', parts.join(' '), color)
+  return stageLine('HOOK', parts.join(' '), state)
 }
 
 function renderTranscriptAppend(
@@ -718,7 +747,7 @@ function renderTranscriptAppend(
         ...stageLine(
           'DECISION',
           'tool_result appended, loop back to LLM',
-          state.color,
+          state,
         ),
       )
       state.learnLoopBackRenderedBeforeLoopEnd = true
@@ -746,18 +775,18 @@ function renderTranscriptAppend(
     parts.push(`bytes=${byteCount}`)
   }
 
-  lines.push(...stageLine('STORE', parts.join(' '), state.color))
+  lines.push(...stageLine('STORE', parts.join(' '), state))
   return lines
 }
 
 function renderTraceSession(
   eventType: 'trace.session_start' | 'trace.session_end',
-  color: boolean,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
 ): string[] {
   const sessionEvent =
     eventType === 'trace.session_start' ? 'session_start' : 'session_end'
 
-  return stageLine('STORE', `trace ${sessionEvent}`, color)
+  return stageLine('STORE', `trace ${sessionEvent}`, state)
 }
 
 function renderLoopEnd(
@@ -777,12 +806,12 @@ function renderLoopEnd(
       return stageLine(
         'DECISION',
         'tool_result appended, loop back to LLM',
-        state.color,
+        state,
       )
     }
 
     state.learnLoopBackRenderedBeforeLoopEnd = false
-    return stageLine('DECISION', `LOOP ${stopReason}`, state.color)
+    return stageLine('DECISION', `LOOP ${stopReason}`, state)
   }
 
   const loopIndex = getNumber(payload, 'loopIndex') ?? 0
@@ -803,12 +832,12 @@ function renderLoopEnd(
     parts.push(`duration=${durationMs}ms`)
   }
 
-  return stageLine('DECISION', parts.join(' '), state.color)
+  return stageLine('DECISION', parts.join(' '), state)
 }
 
 function renderRetry(
   payload: Record<string, unknown>,
-  color: boolean,
+  state: Pick<TraceLiveState, 'color' | 'language'>,
 ): string[] {
   const retryType = getString(payload, 'retryType') ?? 'api retry'
   const parts = [`RETRY ${retryType}`]
@@ -836,7 +865,7 @@ function renderRetry(
   return stageLine(
     'LLM',
     parts.length === 1 ? 'RETRY api retry collapsed' : parts.join(' '),
-    color,
+    state,
   )
 }
 
@@ -854,7 +883,7 @@ function renderTurnEnd(
         ? ''
         : ` duration=${formatHumanDurationMs(durationMs)}`
 
-    const lines = stageLine('DONE', `${resultReason}${duration}`, state.color)
+    const lines = stageLine('DONE', `${resultReason}${duration}`, state)
 
     updateLearnTranscriptStoreScopeOnTurnEnd(payload, state)
     return lines
@@ -871,7 +900,7 @@ function renderTurnEnd(
     parts.push(`finalMessages=${finalMessageCount}`)
   }
 
-  return stageLine('DONE', parts.join(' '), state.color)
+  return stageLine('DONE', parts.join(' '), state)
 }
 
 function getLearnTranscriptStoreEntryTypesSeen(

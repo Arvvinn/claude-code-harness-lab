@@ -20,6 +20,7 @@ import {
   renderTraceLiveHeader,
   type TraceLiveStream,
 } from './liveStream.js'
+import type { TraceDisplayLanguage } from './liveStream.js'
 import { TRACE_TAIL_COMMAND } from './liveWindow.js'
 import { clearActiveTraceSession, readActiveTraceSession } from './store.js'
 import type { TraceMode } from './types.js'
@@ -79,7 +80,7 @@ const TAIL_CONTINUITY_MARKER_BYTES = 64
 const TAIL_ORIENTATION_SNAPSHOT_BYTES = 256 * 1024
 
 const USAGE =
-  'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--deep] [--raw]|replay <sessionId> [--deep] [--raw]|inspect <sessionId>'
+  'Usage: claude trace status|off|learn|full|list|tail [sessionId] [--deep] [--lang zh|en|both] [--raw]|replay <sessionId> [--deep] [--lang zh|en|both] [--raw]|inspect <sessionId>'
 
 export async function traceMain(
   args: string[],
@@ -104,17 +105,20 @@ export async function traceMain(
       case 'list':
         writeText(io.stdout, getListText())
         return 0
-      case 'replay':
+      case 'replay': {
+        const language = getLanguageFlag(args)
         writeText(
           io.stdout,
           getReplayText(
             requireSessionId(getFirstNonFlagArg(args.slice(1)), 'replay'),
             hasRawFlag(args),
             hasDeepFlag(args),
+            language,
             io.stdout,
           ),
         )
         return 0
+      }
       case 'inspect':
         writeText(
           io.stdout,
@@ -128,6 +132,7 @@ export async function traceMain(
           options.tail,
           hasRawFlag(args),
           hasDeepFlag(args),
+          getLanguageFlag(args),
         )
         return 0
       case '-h':
@@ -340,6 +345,7 @@ function getReplayText(
   sessionId: string,
   raw: boolean,
   deep: boolean,
+  language: TraceDisplayLanguage,
   output: WritableOutput,
 ): string {
   if (raw) {
@@ -359,10 +365,16 @@ function getReplayText(
   }
 
   const depth = deep ? 'deep' : 'learn'
-  const stream = createTraceLiveStream({ depth, color: shouldUseColor(output) })
+  const stream = createTraceLiveStream({
+    depth,
+    color: shouldUseColor(output),
+    language,
+  })
   const lines = [
     depth === 'deep' ? 'Trace Replay - Deep' : 'Trace Replay - Learn',
     `Session: ${sessionId}`,
+    `Language: ${formatLanguageMarker(language)}`,
+    'Pattern: User -> messages[] -> LLM -> decision -> tools -> results -> loop/return',
     '',
   ]
 
@@ -409,6 +421,7 @@ async function writeTail(
   options: TraceTailOptions = {},
   raw = false,
   deep = false,
+  language: TraceDisplayLanguage = 'both',
 ): Promise<void> {
   const target = getTailTarget(requestedSessionId)
 
@@ -443,6 +456,7 @@ async function writeTail(
   const stream = createTraceLiveStream({
     depth,
     color: !raw && shouldUseColor(io.stdout),
+    language,
   })
 
   if (!raw) {
@@ -452,6 +466,7 @@ async function writeTail(
         depth,
         sessionId: target.sessionId,
         eventsPath: target.eventsPath,
+        language,
       }),
     )
   }
@@ -805,8 +820,44 @@ function hasDeepFlag(args: string[]): boolean {
   return args.includes('--deep')
 }
 
+function getLanguageFlag(args: string[]): TraceDisplayLanguage {
+  const langIndex = args.indexOf('--lang')
+
+  if (langIndex === -1) {
+    return 'both'
+  }
+
+  const value = args[langIndex + 1]
+  if (value === 'both' || value === 'zh' || value === 'en') {
+    return value
+  }
+
+  throw new Error(`Invalid trace language: ${value ?? '<missing>'}`)
+}
+
+function formatLanguageMarker(language: TraceDisplayLanguage): string {
+  if (language === 'both') {
+    return 'zh+en'
+  }
+
+  return language
+}
+
 function getFirstNonFlagArg(args: string[]): string | undefined {
-  return args.find(arg => !arg.startsWith('-'))
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]
+
+    if (arg === '--lang') {
+      index += 1
+      continue
+    }
+
+    if (arg !== undefined && !arg.startsWith('-')) {
+      return arg
+    }
+  }
+
+  return undefined
 }
 
 function writeText(output: WritableOutput, text: string): void {
